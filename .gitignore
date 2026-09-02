@@ -15,4 +15,6 @@ debian-binary
 arch_build
 scansmith_temp
 aura_temp
+__pycache__
+*.pyc
 .DS_Store

@@ -49,4 +49,4 @@ bun run build:win
 
 ## 📜 License
 
-MIT License © 2026 ScanSmith AI Studio
+PolyForm Noncommercial License 1.0.0 © 2026 ScanSmith AI Studio

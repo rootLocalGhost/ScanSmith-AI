@@ -321,18 +321,88 @@ async fn generate_docx(
         }
     });
 
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(120)).build().unwrap();
-    let res = client
-        .post(format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}", model, api_key))
-        .json(&serde_json::json!({ "contents": [{ "parts": parts }], "generationConfig": config }))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("HTTP Client initialization failed: {}", e))?;
 
-    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-    if let Some(err) = json.get("error") {
-        return Err(format!("API Error: {}", err));
+    let mut last_error = String::new();
+    let mut success_json: Option<serde_json::Value> = None;
+
+    for attempt in 1..=3 {
+        if attempt > 1 {
+            let _ = window.emit(
+                "process-progress",
+                Progress {
+                    percent: 50.0 + (attempt as f32 * 5.0),
+                    message: format!("Gemini server busy, retrying attempt {}/3...", attempt),
+                },
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1500 * attempt as u64)).await;
+        }
+
+        let req_result = client
+            .post(format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}", model, api_key))
+            .json(&serde_json::json!({ "contents": [{ "parts": &parts }], "generationConfig": &config }))
+            .send()
+            .await;
+
+        let res = match req_result {
+            Ok(r) => r,
+            Err(e) => {
+                last_error = format!("Network connection failed: {}", e);
+                continue;
+            }
+        };
+
+        let status = res.status();
+        let text = match res.text().await {
+            Ok(t) => t,
+            Err(e) => {
+                last_error = format!("Failed to read response body: {}", e);
+                continue;
+            }
+        };
+
+        if !status.is_success() {
+            if let Ok(json_err) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(err_obj) = json_err.get("error") {
+                    let msg = err_obj.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown API Error");
+                    let status_code = err_obj.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                    last_error = format!("Google Gemini API Error ({} - {}): {}", status.as_u16(), status_code, msg);
+                    
+                    // If 503 (Server Busy) or 429 (Rate Limit), retry; otherwise break immediately
+                    if status == reqwest::StatusCode::SERVICE_UNAVAILABLE || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                        continue;
+                    } else {
+                        return Err(last_error);
+                    }
+                }
+            }
+            last_error = format!("Google Gemini API Error (HTTP {}): {}", status.as_u16(), text);
+            continue;
+        }
+
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(json_parsed) => {
+                success_json = Some(json_parsed);
+                break;
+            }
+            Err(e) => {
+                last_error = format!("Failed to parse Gemini response JSON: {}\nRaw: {}", e, text);
+            }
+        }
     }
+
+    let json = match success_json {
+        Some(j) => j,
+        None => {
+            return Err(format!(
+                "{}\n(Tip: If this model is unavailable, try switching to another model like gemini-3.7-flash or gemini-2.0-flash from the dropdown)",
+                last_error
+            ));
+        }
+    };
 
     let _ = window.emit(
         "process-progress",

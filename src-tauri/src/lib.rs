@@ -40,15 +40,53 @@ async fn preprocess_images(
     settings: serde_json::Value,
 ) -> Result<Vec<String>, String> {
     if image_paths.is_empty() {
-        return Err("No images".into());
+        return Err("No images selected for preprocessing".into());
     }
 
-    // Keep the script reference pointing to the source folder
-    let current_dir = std::env::current_dir().unwrap();
-    let script_path = current_dir.join("aura_cv.py");
+    // Resolve aura_cv.py path across development, project root, and release binary locations
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let script_candidates = [
+        current_dir.join("aura_cv.py"),
+        current_dir.join("src-tauri").join("aura_cv.py"),
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("aura_cv.py")))
+            .unwrap_or_else(|| current_dir.join("aura_cv.py")),
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("../Resources/aura_cv.py")))
+            .unwrap_or_else(|| current_dir.join("aura_cv.py")),
+    ];
 
-    // FIX: Create the temp directory next to the ORIGINAL images (outside of src-tauri)
-    // This stops the Tauri watcher from triggering an infinite reload loop!
+    let script_path = script_candidates
+        .iter()
+        .find(|p| p.exists())
+        .cloned()
+        .unwrap_or_else(|| current_dir.join("aura_cv.py"));
+
+    if !script_path.exists() {
+        return Err(format!(
+            "Could not locate aura_cv.py script. Searched in: {:?}",
+            script_candidates
+        ));
+    }
+
+    // Auto-detect available Python interpreter (python3 / python / py)
+    let python_candidates = ["python3", "python", "py"];
+    let python_bin = python_candidates
+        .iter()
+        .find(|&&bin| {
+            Command::new(bin)
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        })
+        .copied()
+        .unwrap_or("python3")
+        .to_string();
+
+    // Create temp directory next to original images
     let first_img = Path::new(&image_paths[0]);
     let out_dir = first_img.parent().unwrap().join("aura_temp");
     std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
@@ -64,6 +102,7 @@ async fn preprocess_images(
 
     for (idx, path) in image_paths.into_iter().enumerate() {
         let script = script_path.clone();
+        let py_bin = python_bin.clone();
         let out = out_dir.clone();
         let window_clone = window.clone();
         let counter_clone = completed.clone();
@@ -75,7 +114,7 @@ async fn preprocess_images(
         );
 
         tasks.push(tokio::task::spawn_blocking(move || {
-            let output = Command::new("python")
+            let output = Command::new(&py_bin)
                 .args([
                     script.to_str().unwrap(),
                     "--input",
@@ -94,7 +133,28 @@ async fn preprocess_images(
                     &m,
                 ])
                 .output()
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| format!("Failed to launch Python ({}) interpreter: {}", py_bin, e))?;
+
+            let stdout_str = String::from_utf8_lossy(&output.stdout);
+            let stderr_str = String::from_utf8_lossy(&output.stderr);
+
+            if !output.status.success() || stdout_str.trim().is_empty() {
+                return Err(format!(
+                    "OpenCV script execution failed (exit code {:?}):\n{}\n{}",
+                    output.status.code(),
+                    stderr_str.trim(),
+                    stdout_str.trim()
+                ));
+            }
+
+            let result: CVResult = serde_json::from_str(stdout_str.trim()).map_err(|e| {
+                format!(
+                    "Failed to parse OpenCV output: {}\nOutput received was:\n{}\nStderr:\n{}",
+                    e,
+                    stdout_str.trim(),
+                    stderr_str.trim()
+                )
+            })?;
 
             let count = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             let _ = window_clone.emit(
@@ -105,8 +165,6 @@ async fn preprocess_images(
                 },
             );
 
-            let result: CVResult = serde_json::from_slice(&output.stdout)
-                .map_err(|e| format!("CV Script Error (Is Python/OpenCV installed?): {}", e))?;
             Ok(result.files)
         }));
     }

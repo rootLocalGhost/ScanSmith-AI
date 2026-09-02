@@ -21,10 +21,12 @@
     "tauri": "tauri",
     "cleanup": "cd src-tauri && cargo clean && rm -rf target gen && cd .. && rm -rf node_modules dist pkg PKGBUILD.1",
     "init": "cd src-tauri && cargo build && cd .. && bun install && vite build",
+    "generate:icons": "bun ./scripts/generate-icons.js",
+    "icons": "bun ./scripts/generate-icons.js",
     "version:verify": "bun ./scripts/verify-versions.js",
     "test": "vitest run"
   },
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.7.3",

@@ -120,30 +120,30 @@ async fn preprocess_images(
         return Err("No images selected for preprocessing".into());
     }
 
-    // Resolve aura_cv.py path across development, project root, and release binary locations
+    // Resolve scansmith_cv.py path across development, project root, and release binary locations
     let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let script_candidates = [
-        current_dir.join("aura_cv.py"),
-        current_dir.join("src-tauri").join("aura_cv.py"),
+        current_dir.join("scansmith_cv.py"),
+        current_dir.join("src-tauri").join("scansmith_cv.py"),
         std::env::current_exe()
             .ok()
-            .and_then(|p| p.parent().map(|d| d.join("aura_cv.py")))
-            .unwrap_or_else(|| current_dir.join("aura_cv.py")),
+            .and_then(|p| p.parent().map(|d| d.join("scansmith_cv.py")))
+            .unwrap_or_else(|| current_dir.join("scansmith_cv.py")),
         std::env::current_exe()
             .ok()
-            .and_then(|p| p.parent().map(|d| d.join("../Resources/aura_cv.py")))
-            .unwrap_or_else(|| current_dir.join("aura_cv.py")),
+            .and_then(|p| p.parent().map(|d| d.join("../Resources/scansmith_cv.py")))
+            .unwrap_or_else(|| current_dir.join("scansmith_cv.py")),
     ];
 
     let script_path = script_candidates
         .iter()
         .find(|p| p.exists())
         .cloned()
-        .unwrap_or_else(|| current_dir.join("aura_cv.py"));
+        .unwrap_or_else(|| current_dir.join("scansmith_cv.py"));
 
     if !script_path.exists() {
         return Err(format!(
-            "Could not locate aura_cv.py script. Searched in: {:?}",
+            "Could not locate scansmith_cv.py script. Searched in: {:?}",
             script_candidates
         ));
     }
@@ -153,7 +153,7 @@ async fn preprocess_images(
 
     // Create temp directory next to original images
     let first_img = Path::new(&image_paths[0]);
-    let out_dir = first_img.parent().unwrap().join("aura_temp");
+    let out_dir = first_img.parent().unwrap().join("scansmith_temp");
     std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
 
     let split = if settings["split"].as_bool().unwrap_or(true) { "1" } else { "0" };
@@ -266,7 +266,7 @@ async fn generate_docx(
     window: tauri::Window,
     api_key: String,
     cleaned_paths: Vec<String>,
-    original_img_path: String, // Tracks the source folder instead of aura_temp
+    original_img_path: String, // Tracks the source folder instead of scansmith_temp
     doc_type: String,
     custom_prompt: String,
     model: String,

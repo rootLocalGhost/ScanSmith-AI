@@ -82,17 +82,17 @@ const MODELS: ModelInfo[] = [
 export default function App() {
   // Theme State
   const [theme, setTheme] = createSignal<"dark" | "light">(
-    (localStorage.getItem("AURA_THEME") as "dark" | "light") || "light"
+    ((localStorage.getItem("SCANSMITH_THEME") || localStorage.getItem("AURA_THEME")) as "dark" | "light") || "light"
   );
 
   // Settings State
-  const [apiKey, setApiKey] = createSignal(localStorage.getItem("AURA_API_KEY") || "");
-  const [model, setModel] = createSignal(localStorage.getItem("AURA_MODEL") || MODELS[0].id);
+  const [apiKey, setApiKey] = createSignal(localStorage.getItem("SCANSMITH_API_KEY") || localStorage.getItem("AURA_API_KEY") || "");
+  const [model, setModel] = createSignal(localStorage.getItem("SCANSMITH_MODEL") || localStorage.getItem("AURA_MODEL") || MODELS[0].id);
   const [isModelDropdownOpen, setIsModelDropdownOpen] = createSignal(false);
 
-  const [selectedPreset, setSelectedPreset] = createSignal(localStorage.getItem("AURA_PRESET") || PRESETS[0].name);
+  const [selectedPreset, setSelectedPreset] = createSignal(localStorage.getItem("SCANSMITH_PRESET") || localStorage.getItem("AURA_PRESET") || PRESETS[0].name);
   const [instructions, setInstructions] = createSignal(
-    localStorage.getItem("AURA_PROMPT") || PRESETS[0].prompt
+    localStorage.getItem("SCANSMITH_PROMPT") || localStorage.getItem("AURA_PROMPT") || PRESETS[0].prompt
   );
 
   // OpenCV Pipeline Settings
@@ -151,7 +151,7 @@ export default function App() {
   const toggleTheme = () => {
     const next = theme() === "dark" ? "light" : "dark";
     setTheme(next);
-    localStorage.setItem("AURA_THEME", next);
+    localStorage.setItem("SCANSMITH_THEME", next);
     document.documentElement.setAttribute("data-theme", next);
   };
 
@@ -546,8 +546,8 @@ export default function App() {
                       <div
                         class={`preset-card ${selectedPreset() === p.name ? 'active' : ''}`}
                         onClick={() => {
-                          updateState(setSelectedPreset, "AURA_PRESET", p.name);
-                          updateState(setInstructions, "AURA_PROMPT", p.prompt);
+                          updateState(setSelectedPreset, "SCANSMITH_PRESET", p.name);
+                          updateState(setInstructions, "SCANSMITH_PROMPT", p.prompt);
                         }}
                       >
                         <div class="preset-header">
@@ -588,7 +588,7 @@ export default function App() {
                           <li
                             class={`custom-select-option ${model() === m.id ? 'selected' : ''}`}
                             onClick={() => {
-                              updateState(setModel, "AURA_MODEL", m.id);
+                              updateState(setModel, "SCANSMITH_MODEL", m.id);
                               setIsModelDropdownOpen(false);
                             }}
                           >
@@ -613,7 +613,7 @@ export default function App() {
                 <textarea
                   class="modern-textarea"
                   value={instructions()}
-                  onInput={(e) => updateState(setInstructions, "AURA_PROMPT", e.currentTarget.value)}
+                  onInput={(e) => updateState(setInstructions, "SCANSMITH_PROMPT", e.currentTarget.value)}
                   placeholder="Enter custom instructions for formatting, equations, Bangla font styling..."
                 />
               </div>
@@ -1015,7 +1015,7 @@ export default function App() {
                   type="password"
                   class="modern-input"
                   value={apiKey()}
-                  onInput={(e) => updateState(setApiKey, "AURA_API_KEY", e.currentTarget.value.trim())}
+                  onInput={(e) => updateState(setApiKey, "SCANSMITH_API_KEY", e.currentTarget.value.trim())}
                   placeholder="AIzaSy..."
                 />
                 <div class="setting-hint">

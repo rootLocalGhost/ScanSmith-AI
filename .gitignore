@@ -13,5 +13,6 @@ control.tar.*
 data.tar.*
 debian-binary
 arch_build
+scansmith_temp
 aura_temp
 .DS_Store

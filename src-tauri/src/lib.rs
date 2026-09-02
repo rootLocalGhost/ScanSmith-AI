@@ -6,6 +6,8 @@ use std::path::Path;
 use std::process::Command;
 use tauri::Emitter;
 
+const EMBEDDED_CV_SCRIPT: &str = include_str!("../scansmith_cv.py");
+
 #[derive(Debug, Serialize, Deserialize)]
 struct CVResult {
     success: bool,
@@ -19,6 +21,17 @@ struct CVResult {
 struct Progress {
     percent: f32,
     message: String,
+}
+
+fn ensure_cv_script_available() -> Result<std::path::PathBuf, String> {
+    let temp_script_path = std::env::temp_dir().join("scansmith_ai_cv_engine.py");
+    std::fs::write(&temp_script_path, EMBEDDED_CV_SCRIPT).map_err(|e| {
+        format!(
+            "Failed to write embedded OpenCV script to {:?}: {}",
+            temp_script_path, e
+        )
+    })?;
+    Ok(temp_script_path)
 }
 
 fn get_enriched_path() -> String {
@@ -120,33 +133,8 @@ async fn preprocess_images(
         return Err("No images selected for preprocessing".into());
     }
 
-    // Resolve scansmith_cv.py path across development, project root, and release binary locations
-    let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let script_candidates = [
-        current_dir.join("scansmith_cv.py"),
-        current_dir.join("src-tauri").join("scansmith_cv.py"),
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("scansmith_cv.py")))
-            .unwrap_or_else(|| current_dir.join("scansmith_cv.py")),
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("../Resources/scansmith_cv.py")))
-            .unwrap_or_else(|| current_dir.join("scansmith_cv.py")),
-    ];
-
-    let script_path = script_candidates
-        .iter()
-        .find(|p| p.exists())
-        .cloned()
-        .unwrap_or_else(|| current_dir.join("scansmith_cv.py"));
-
-    if !script_path.exists() {
-        return Err(format!(
-            "Could not locate scansmith_cv.py script. Searched in: {:?}",
-            script_candidates
-        ));
-    }
+    // In production and dev, extract the self-contained embedded python script to temp directory
+    let script_path = ensure_cv_script_available()?;
 
     let env_path = get_enriched_path();
     let python_bin = resolve_python_binary(&env_path);

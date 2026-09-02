@@ -9,13 +9,90 @@ use tauri::Emitter;
 #[derive(Debug, Serialize, Deserialize)]
 struct CVResult {
     success: bool,
+    #[serde(default)]
     files: Vec<String>,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
 struct Progress {
     percent: f32,
     message: String,
+}
+
+fn get_enriched_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let current_path = std::env::var("PATH").unwrap_or_default();
+
+    let extra_paths = [
+        format!("{}/.local/share/mise/shims", home),
+        format!("{}/.local/bin", home),
+        format!("{}/.cargo/bin", home),
+        format!("{}/.pyenv/shims", home),
+        format!("{}/miniconda3/bin", home),
+        format!("{}/anaconda3/bin", home),
+        "/usr/local/bin".to_string(),
+        "/usr/bin".to_string(),
+        "/bin".to_string(),
+    ];
+
+    let mut combined: Vec<String> = extra_paths
+        .into_iter()
+        .filter(|p| std::path::Path::new(p).exists())
+        .collect();
+
+    if !current_path.is_empty() {
+        combined.push(current_path);
+    }
+
+    combined.join(":")
+}
+
+fn resolve_python_binary(env_path: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    
+    // Explicit known locations
+    let explicit_candidates = [
+        format!("{}/.local/share/mise/shims/python3", home),
+        format!("{}/.local/share/mise/shims/python", home),
+        format!("{}/.local/bin/python3", home),
+        format!("{}/.local/bin/python", home),
+        "/usr/bin/python3".to_string(),
+        "/usr/bin/python".to_string(),
+        "python3".to_string(),
+        "python".to_string(),
+        "py".to_string(),
+    ];
+
+    // Priority 1: Check which candidate can actually import cv2 and numpy!
+    for candidate in &explicit_candidates {
+        if let Ok(output) = Command::new(candidate)
+            .env("PATH", env_path)
+            .arg("-c")
+            .arg("import cv2, numpy; print('OPENCV_OK')")
+            .output()
+        {
+            if output.status.success() && String::from_utf8_lossy(&output.stdout).contains("OPENCV_OK") {
+                return candidate.clone();
+            }
+        }
+    }
+
+    // Priority 2: Any python executable that runs --version
+    for candidate in &explicit_candidates {
+        if let Ok(output) = Command::new(candidate)
+            .env("PATH", env_path)
+            .arg("--version")
+            .output()
+        {
+            if output.status.success() {
+                return candidate.clone();
+            }
+        }
+    }
+
+    "python3".to_string()
 }
 
 // Bypasses Tauri's frontend scopes and forces the OS to open the file directly
@@ -71,20 +148,8 @@ async fn preprocess_images(
         ));
     }
 
-    // Auto-detect available Python interpreter (python3 / python / py)
-    let python_candidates = ["python3", "python", "py"];
-    let python_bin = python_candidates
-        .iter()
-        .find(|&&bin| {
-            Command::new(bin)
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        })
-        .copied()
-        .unwrap_or("python3")
-        .to_string();
+    let env_path = get_enriched_path();
+    let python_bin = resolve_python_binary(&env_path);
 
     // Create temp directory next to original images
     let first_img = Path::new(&image_paths[0]);
@@ -103,6 +168,7 @@ async fn preprocess_images(
     for (idx, path) in image_paths.into_iter().enumerate() {
         let script = script_path.clone();
         let py_bin = python_bin.clone();
+        let env_p = env_path.clone();
         let out = out_dir.clone();
         let window_clone = window.clone();
         let counter_clone = completed.clone();
@@ -115,6 +181,7 @@ async fn preprocess_images(
 
         tasks.push(tokio::task::spawn_blocking(move || {
             let output = Command::new(&py_bin)
+                .env("PATH", &env_p)
                 .args([
                     script.to_str().unwrap(),
                     "--input",
@@ -138,23 +205,30 @@ async fn preprocess_images(
             let stdout_str = String::from_utf8_lossy(&output.stdout);
             let stderr_str = String::from_utf8_lossy(&output.stderr);
 
-            if !output.status.success() || stdout_str.trim().is_empty() {
+            if stdout_str.trim().is_empty() {
                 return Err(format!(
-                    "OpenCV script execution failed (exit code {:?}):\n{}\n{}",
+                    "OpenCV script returned empty output (exit code {:?}).\nStderr:\n{}\nIs OpenCV installed?",
                     output.status.code(),
-                    stderr_str.trim(),
-                    stdout_str.trim()
+                    stderr_str.trim()
                 ));
             }
 
-            let result: CVResult = serde_json::from_str(stdout_str.trim()).map_err(|e| {
-                format!(
-                    "Failed to parse OpenCV output: {}\nOutput received was:\n{}\nStderr:\n{}",
-                    e,
-                    stdout_str.trim(),
-                    stderr_str.trim()
-                )
-            })?;
+            let result: CVResult = match serde_json::from_str(stdout_str.trim()) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to parse OpenCV JSON output: {}\nStdout:\n{}\nStderr:\n{}",
+                        e,
+                        stdout_str.trim(),
+                        stderr_str.trim()
+                    ));
+                }
+            };
+
+            if !result.success {
+                let err_msg = result.error.unwrap_or_else(|| "Unknown OpenCV processing error".into());
+                return Err(format!("OpenCV Processing Error: {}", err_msg));
+            }
 
             let count = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             let _ = window_clone.emit(

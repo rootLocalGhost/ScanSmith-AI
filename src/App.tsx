@@ -69,14 +69,13 @@ const PRESETS: PresetInfo[] = [
 ];
 
 const MODELS: ModelInfo[] = [
-  { id: "gemini-pro-latest", name: "Gemini Pro Latest", badge: "Best" },
-  { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview", badge: "Best" },
-  { id: "gemini-3.7-flash", name: "Gemini 3.7 Flash", badge: "Recommended" },
-  { id: "gemini-3.6-flash", name: "Gemini 3.6 Flash", badge: "Fast-Stable" },
-  { id: "gemini-3.5-flash-lite", name: "Gemini 3.5 Flash Lite", badge: "Lightweight" },
-  { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", badge: "Fast" },
-  { id: "gemini-3.1-flash-lite", name: "Gemini 3.1 Flash Lite", badge: "Ultra-Fast" },
-  { id: "gemini-3-flash-preview", name: "Gemini 3 Flash Preview", badge: "Preview" }
+  { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", badge: "Recommended" },
+  { id: "gemini-3.5-flash-lite", name: "Gemini 3.5 Flash Lite", badge: "Ultra-Fast" },
+  { id: "gemini-3.1-flash-lite", name: "Gemini 3.1 Flash Lite", badge: "Lightweight" },
+  { id: "gemini-3.6-flash", name: "Gemini 3.6 Flash", badge: "Preview" },
+  { id: "gemini-3.7-flash", name: "Gemini 3.7 Flash", badge: "Reasoning" },
+  { id: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview", badge: "Paid Quota" },
+  { id: "gemini-pro-latest", name: "Gemini Pro Latest", badge: "Paid Quota" }
 ];
 
 export default function App() {
@@ -87,7 +86,9 @@ export default function App() {
 
   // Settings State
   const [apiKey, setApiKey] = createSignal(localStorage.getItem("SCANSMITH_API_KEY") || localStorage.getItem("AURA_API_KEY") || "");
-  const [model, setModel] = createSignal(localStorage.getItem("SCANSMITH_MODEL") || localStorage.getItem("AURA_MODEL") || MODELS[0].id);
+  const savedModel = localStorage.getItem("SCANSMITH_MODEL") || localStorage.getItem("AURA_MODEL") || "";
+  const initialModel = MODELS.some(m => m.id === savedModel && !m.badge.includes("Paid")) ? savedModel : MODELS[0].id;
+  const [model, setModel] = createSignal(initialModel);
   const [isModelDropdownOpen, setIsModelDropdownOpen] = createSignal(false);
 
   const [selectedPreset, setSelectedPreset] = createSignal(localStorage.getItem("SCANSMITH_PRESET") || localStorage.getItem("AURA_PRESET") || PRESETS[0].name);
@@ -95,11 +96,31 @@ export default function App() {
     localStorage.getItem("SCANSMITH_PROMPT") || localStorage.getItem("AURA_PROMPT") || PRESETS[0].prompt
   );
 
-  // OpenCV Pipeline Settings
-  const [cvSplit, setCvSplit] = createSignal(true);
-  const [cvOrient, setCvOrient] = createSignal(true);
-  const [cvDeskew, setCvDeskew] = createSignal(true);
-  const [cvMargins, setCvMargins] = createSignal(true);
+  // OpenCV Pipeline Settings with LocalStorage persistence
+  const [cvSplit, setCvSplit] = createSignal(localStorage.getItem("SCANSMITH_CV_SPLIT") !== "false");
+  const [cvOrient, setCvOrient] = createSignal(localStorage.getItem("SCANSMITH_CV_ORIENT") !== "false");
+  const [cvDeskew, setCvDeskew] = createSignal(localStorage.getItem("SCANSMITH_CV_DESKEW") !== "false");
+  const [cvMargins, setCvMargins] = createSignal(localStorage.getItem("SCANSMITH_CV_MARGINS") !== "false");
+  const [cvShadows, setCvShadows] = createSignal(localStorage.getItem("SCANSMITH_CV_SHADOWS") !== "false");
+  const [cvDenoise, setCvDenoise] = createSignal(localStorage.getItem("SCANSMITH_CV_DENOISE") === "true");
+  const [cvFilterMode, setCvFilterMode] = createSignal<"color" | "grayscale" | "bw" | "original">(
+    (localStorage.getItem("SCANSMITH_CV_MODE") as any) || "color"
+  );
+  const [isCvStale, setIsCvStale] = createSignal(false);
+  const [imageVersion, setImageVersion] = createSignal(Date.now());
+  const [lightboxCompareMode, setLightboxCompareMode] = createSignal<"single" | "compare">("single");
+
+  const toggleCvSetting = (setter: (v: boolean) => void, key: string, val: boolean) => {
+    setter(val);
+    localStorage.setItem(key, String(val));
+    setIsCvStale(true);
+  };
+
+  const selectCvFilterMode = (mode: "color" | "grayscale" | "bw" | "original") => {
+    setCvFilterMode(mode);
+    localStorage.setItem("SCANSMITH_CV_MODE", mode);
+    setIsCvStale(true);
+  };
 
   // Document & Image State
   const [images, setImages] = createSignal<string[]>([]);
@@ -212,31 +233,51 @@ export default function App() {
     }
   };
 
-  // Reorder & Manage Pages
+  // Reorder & Manage Pages (supports both raw and cleaned images)
   const movePage = (index: number, direction: "left" | "right") => {
+    const isCleaned = viewMode() === "cleaned" && cleanedImages().length > 0;
+    const targetList = isCleaned ? [...cleanedImages()] : [...images()];
     const targetIdx = direction === "left" ? index - 1 : index + 1;
-    if (targetIdx < 0 || targetIdx >= images().length) return;
+    if (targetIdx < 0 || targetIdx >= targetList.length) return;
 
-    setImages(prev => {
-      const copy = [...prev];
-      const temp = copy[index];
-      copy[index] = copy[targetIdx];
-      copy[targetIdx] = temp;
-      return copy;
-    });
+    const temp = targetList[index];
+    targetList[index] = targetList[targetIdx];
+    targetList[targetIdx] = temp;
 
-    if (cleanedImages().length) {
-      setCleanedImages([]);
-      addToast("Reordered pages. Re-run OpenCV to update enhanced scans.", "info");
+    if (isCleaned) {
+      setCleanedImages(targetList);
+    } else {
+      setImages(targetList);
+      setIsCvStale(true);
     }
   };
 
   const removePage = (index: number) => {
-    setImages(prev => prev.filter((_, i) => i !== index));
-    if (cleanedImages().length) {
+    const isCleaned = viewMode() === "cleaned" && cleanedImages().length > 0;
+    if (isCleaned) {
+      setCleanedImages(prev => prev.filter((_, i) => i !== index));
+    } else {
+      setImages(prev => prev.filter((_, i) => i !== index));
       setCleanedImages([]);
+      setIsCvStale(false);
     }
-    addToast("Removed page from queue", "info");
+    addToast("Removed page", "info");
+  };
+
+  const rotatePageItem = async (e: MouseEvent, index: number, angle: number) => {
+    e.stopPropagation();
+    const isCleaned = viewMode() === "cleaned" && cleanedImages().length > 0;
+    const list = isCleaned ? cleanedImages() : images();
+    const targetImg = list[index];
+    if (!targetImg) return;
+
+    try {
+      await invoke("rotate_page", { path: targetImg, angle });
+      setImageVersion(Date.now());
+      addToast(`Rotated page ${index + 1} (${angle > 0 ? "+" : ""}${angle}°)`, "info");
+    } catch (err: any) {
+      addToast(`Rotation failed: ${err}`, "error", `${err}`);
+    }
   };
 
   const clearAllScans = () => {
@@ -244,16 +285,17 @@ export default function App() {
     setCleanedImages([]);
     setOutputResult(null);
     setLastError(null);
+    setIsCvStale(false);
     addToast("Cleared all scans", "info");
   };
 
   // Run OpenCV Processing
-  const runOpenCV = async () => {
-    if (!images().length) return;
+  const executeOpenCV = async (): Promise<string[]> => {
+    if (!images().length) return [];
     setIsProcessing(true);
     setLastError(null);
     setProgressPct(5);
-    setProgressMsg("Initializing OpenCV Optimization Pipeline...");
+    setProgressMsg("Running OpenCV ScanTailor Optimization Pipeline...");
     try {
       const results: string[] = await invoke("preprocess_images", {
         imagePaths: images(),
@@ -261,20 +303,33 @@ export default function App() {
           split: cvSplit(),
           orient: cvOrient(),
           deskew: cvDeskew(),
-          margins: cvMargins()
+          margins: cvMargins(),
+          shadows: cvShadows(),
+          denoise: cvDenoise(),
+          mode: cvFilterMode()
         }
       });
       setCleanedImages(results);
+      setIsCvStale(false);
+      setImageVersion(Date.now());
       setViewMode("cleaned");
       addToast(`Optimized ${results.length} pages via OpenCV`, "success");
+      return results;
     } catch (err: any) {
       const errMsg = `${err}`;
       setProgressMsg(`OpenCV Error: ${errMsg}`);
       setLastError(`OpenCV Error: ${errMsg}`);
       addToast(`OpenCV Error: ${errMsg}`, "error", errMsg);
+      throw err;
     } finally {
       setIsProcessing(false);
     }
+  };
+
+  const runOpenCV = async () => {
+    try {
+      await executeOpenCV();
+    } catch {}
   };
 
   // Generate AI DOCX
@@ -285,15 +340,29 @@ export default function App() {
       return;
     }
 
-    const pagesToProcess = cleanedImages().length > 0 ? cleanedImages() : images();
-    if (!pagesToProcess.length) {
+    if (!images().length) {
       addToast("Please import images first", "error");
+      return;
+    }
+
+    // Auto-run OpenCV if not yet run or if settings are stale
+    let pagesToProcess = cleanedImages();
+    if (pagesToProcess.length === 0 || isCvStale()) {
+      try {
+        pagesToProcess = await executeOpenCV();
+      } catch {
+        return;
+      }
+    }
+
+    if (!pagesToProcess.length) {
+      addToast("No pages available to process", "error");
       return;
     }
 
     setIsProcessing(true);
     setLastError(null);
-    setProgressPct(5);
+    setProgressPct(10);
     setProgressMsg(`Connecting to ${selectedModelInfo()?.name || model()}...`);
 
     try {
@@ -621,57 +690,156 @@ export default function App() {
 
             {/* OpenCV Pipeline Tab */}
             <Show when={activeSidebarTab() === 'cv'}>
+              {/* Enhancement Filter Mode */}
               <div class="setting-section">
                 <div class="setting-title-row">
-                  <label class="setting-label">Computer Vision Pipeline</label>
-                  <span class="setting-hint">Auto-Enhance</span>
+                  <label class="setting-label">Enhancement Filter</label>
+                  <span class="setting-hint">Document style</span>
+                </div>
+                <div class="filter-mode-grid">
+                  <button
+                    class={`filter-mode-btn ${cvFilterMode() === 'color' ? 'active' : ''}`}
+                    onClick={() => selectCvFilterMode('color')}
+                    type="button"
+                  >
+                    <div class="filter-mode-icon">🎨</div>
+                    <div class="filter-mode-text">
+                      <div class="filter-mode-title">Color Doc</div>
+                      <div class="filter-mode-sub">Whitens paper, keeps pen & colors</div>
+                    </div>
+                  </button>
+                  <button
+                    class={`filter-mode-btn ${cvFilterMode() === 'grayscale' ? 'active' : ''}`}
+                    onClick={() => selectCvFilterMode('grayscale')}
+                    type="button"
+                  >
+                    <div class="filter-mode-icon">🌑</div>
+                    <div class="filter-mode-text">
+                      <div class="filter-mode-title">Grayscale</div>
+                      <div class="filter-mode-sub">High contrast crisp doc gray</div>
+                    </div>
+                  </button>
+                  <button
+                    class={`filter-mode-btn ${cvFilterMode() === 'bw' ? 'active' : ''}`}
+                    onClick={() => selectCvFilterMode('bw')}
+                    type="button"
+                  >
+                    <div class="filter-mode-icon">📄</div>
+                    <div class="filter-mode-text">
+                      <div class="filter-mode-title">Clean B&W</div>
+                      <div class="filter-mode-sub">High-legibility adaptive binary</div>
+                    </div>
+                  </button>
+                  <button
+                    class={`filter-mode-btn ${cvFilterMode() === 'original' ? 'active' : ''}`}
+                    onClick={() => selectCvFilterMode('original')}
+                    type="button"
+                  >
+                    <div class="filter-mode-icon">🖼️</div>
+                    <div class="filter-mode-text">
+                      <div class="filter-mode-title">Natural</div>
+                      <div class="filter-mode-sub">Geometric fixes only, raw photo</div>
+                    </div>
+                  </button>
+                </div>
+              </div>
+
+              {/* Toggles */}
+              <div class="setting-section">
+                <div class="setting-title-row">
+                  <label class="setting-label">Correction Tools</label>
+                  <span class="setting-hint">{[cvSplit(), cvOrient(), cvDeskew(), cvMargins(), cvShadows(), cvDenoise()].filter(Boolean).length} Active</span>
                 </div>
                 <div class="cv-toggles-container">
                   <div class="toggle-row">
                     <div class="toggle-info">
-                      <div class="toggle-name">Split 2-Page Spreads</div>
-                      <div class="toggle-desc">Detects center spine and separates dual-page book scans</div>
+                      <div class="toggle-name">📖 Split 2-Page Spreads</div>
+                      <div class="toggle-desc">Detects center spine & separates dual-page book scans</div>
                     </div>
                     <label class="switch">
-                      <input type="checkbox" checked={cvSplit()} onChange={(e) => setCvSplit(e.currentTarget.checked)} />
+                      <input type="checkbox" checked={cvSplit()} onChange={(e) => toggleCvSetting(setCvSplit, "SCANSMITH_CV_SPLIT", e.currentTarget.checked)} />
                       <span class="slider"></span>
                     </label>
                   </div>
 
                   <div class="toggle-row">
                     <div class="toggle-info">
-                      <div class="toggle-name">Auto Fix Orientation</div>
+                      <div class="toggle-name">🧭 Auto Fix Orientation</div>
                       <div class="toggle-desc">Tesseract OSD automatically rotates upside-down/rotated pages</div>
                     </div>
                     <label class="switch">
-                      <input type="checkbox" checked={cvOrient()} onChange={(e) => setCvOrient(e.currentTarget.checked)} />
+                      <input type="checkbox" checked={cvOrient()} onChange={(e) => toggleCvSetting(setCvOrient, "SCANSMITH_CV_ORIENT", e.currentTarget.checked)} />
                       <span class="slider"></span>
                     </label>
                   </div>
 
                   <div class="toggle-row">
                     <div class="toggle-info">
-                      <div class="toggle-name">Auto Deskew Slant</div>
-                      <div class="toggle-desc">Detects text line angles and straightens perspective skew</div>
+                      <div class="toggle-name">📐 Auto Deskew Slant</div>
+                      <div class="toggle-desc">Radon projection variance straightens slanted text lines</div>
                     </div>
                     <label class="switch">
-                      <input type="checkbox" checked={cvDeskew()} onChange={(e) => setCvDeskew(e.currentTarget.checked)} />
+                      <input type="checkbox" checked={cvDeskew()} onChange={(e) => toggleCvSetting(setCvDeskew, "SCANSMITH_CV_DESKEW", e.currentTarget.checked)} />
                       <span class="slider"></span>
                     </label>
                   </div>
 
                   <div class="toggle-row">
                     <div class="toggle-info">
-                      <div class="toggle-name">Auto Crop & Margins</div>
+                      <div class="toggle-name">✂️ Auto Crop & Margins</div>
                       <div class="toggle-desc">Trims dark scanned borders and adds uniform white margins</div>
                     </div>
                     <label class="switch">
-                      <input type="checkbox" checked={cvMargins()} onChange={(e) => setCvMargins(e.currentTarget.checked)} />
+                      <input type="checkbox" checked={cvMargins()} onChange={(e) => toggleCvSetting(setCvMargins, "SCANSMITH_CV_MARGINS", e.currentTarget.checked)} />
+                      <span class="slider"></span>
+                    </label>
+                  </div>
+
+                  <div class="toggle-row">
+                    <div class="toggle-info">
+                      <div class="toggle-name">💡 Shadow & Crease Removal</div>
+                      <div class="toggle-desc">Equalizes illumination, camera shadows & book spine darkness</div>
+                    </div>
+                    <label class="switch">
+                      <input type="checkbox" checked={cvShadows()} onChange={(e) => toggleCvSetting(setCvShadows, "SCANSMITH_CV_SHADOWS", e.currentTarget.checked)} />
+                      <span class="slider"></span>
+                    </label>
+                  </div>
+
+                  <div class="toggle-row">
+                    <div class="toggle-info">
+                      <div class="toggle-name">✨ Denoise & Despeckle</div>
+                      <div class="toggle-desc">Removes isolated scanner dust specks and background noise</div>
+                    </div>
+                    <label class="switch">
+                      <input type="checkbox" checked={cvDenoise()} onChange={(e) => toggleCvSetting(setCvDenoise, "SCANSMITH_CV_DENOISE", e.currentTarget.checked)} />
                       <span class="slider"></span>
                     </label>
                   </div>
                 </div>
               </div>
+
+              {/* Action Button */}
+              <Show when={images().length > 0}>
+                <div class="setting-section">
+                  <button
+                    class="btn btn-primary"
+                    style={{ width: "100%", "justify-content": "center" }}
+                    onClick={runOpenCV}
+                    disabled={isProcessing()}
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style={{ width: "16px", height: "16px" }}>
+                      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+                    </svg>
+                    {isCvStale() ? "Apply Modified Settings" : "Run OpenCV Preprocessing"}
+                  </button>
+                  <Show when={isCvStale()}>
+                    <div class="stale-settings-hint">
+                      ⚡ Settings changed. Click above to re-apply to scans.
+                    </div>
+                  </Show>
+                </div>
+              </Show>
             </Show>
 
             {/* Output & Export Tab */}
@@ -873,44 +1041,64 @@ export default function App() {
                       <div class="page-card-header">
                         <span class="page-number-badge">Page {idx() + 1}</span>
                         <div class="page-actions-row">
-                          <Show when={viewMode() === 'raw'}>
-                            <button
-                              class="page-mini-btn"
-                              title="Move Left"
-                              disabled={idx() === 0 || isProcessing()}
-                              onClick={() => movePage(idx(), 'left')}
-                            >
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <polyline points="15 18 9 12 15 6" />
-                              </svg>
-                            </button>
-                            <button
-                              class="page-mini-btn"
-                              title="Move Right"
-                              disabled={idx() === activeDisplayImages().length - 1 || isProcessing()}
-                              onClick={() => movePage(idx(), 'right')}
-                            >
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <polyline points="9 18 15 12 9 6" />
-                              </svg>
-                            </button>
-                            <button
-                              class="page-mini-btn delete"
-                              title="Remove Page"
-                              disabled={isProcessing()}
-                              onClick={() => removePage(idx())}
-                            >
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <line x1="18" y1="6" x2="6" y2="18" />
-                                <line x1="6" y1="6" x2="18" y2="18" />
-                              </svg>
-                            </button>
-                          </Show>
+                          <button
+                            class="page-mini-btn"
+                            title="Rotate 90° CCW"
+                            disabled={isProcessing()}
+                            onClick={(e) => rotatePageItem(e, idx(), -90)}
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                              <polyline points="1 4 1 10 7 10" />
+                              <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+                            </svg>
+                          </button>
+                          <button
+                            class="page-mini-btn"
+                            title="Rotate 90° CW"
+                            disabled={isProcessing()}
+                            onClick={(e) => rotatePageItem(e, idx(), 90)}
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                              <polyline points="23 4 23 10 17 10" />
+                              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                            </svg>
+                          </button>
+                          <button
+                            class="page-mini-btn"
+                            title="Move Left"
+                            disabled={idx() === 0 || isProcessing()}
+                            onClick={(e) => { e.stopPropagation(); movePage(idx(), 'left'); }}
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                              <polyline points="15 18 9 12 15 6" />
+                            </svg>
+                          </button>
+                          <button
+                            class="page-mini-btn"
+                            title="Move Right"
+                            disabled={idx() === activeDisplayImages().length - 1 || isProcessing()}
+                            onClick={(e) => { e.stopPropagation(); movePage(idx(), 'right'); }}
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                              <polyline points="9 18 15 12 9 6" />
+                            </svg>
+                          </button>
+                          <button
+                            class="page-mini-btn delete"
+                            title="Remove Page"
+                            disabled={isProcessing()}
+                            onClick={(e) => { e.stopPropagation(); removePage(idx()); }}
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                              <line x1="18" y1="6" x2="6" y2="18" />
+                              <line x1="6" y1="6" x2="18" y2="18" />
+                            </svg>
+                          </button>
                         </div>
                       </div>
 
                       <div class="page-img-preview-box" onClick={() => setLightboxImg(img)}>
-                        <img src={`${convertFileSrc(img)}?t=${Date.now()}`} alt={`Scan page ${idx() + 1}`} />
+                        <img src={`${convertFileSrc(img)}?v=${imageVersion()}`} alt={`Scan page ${idx() + 1}`} />
                         <div class="page-zoom-overlay">
                           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style={{ width: "24px", height: "24px" }}>
                             <circle cx="11" cy="11" r="8" />
@@ -929,11 +1117,17 @@ export default function App() {
               <div class="pipeline-footer-bar">
                 <div class="footer-info">
                   <div class="footer-step-title">
-                    {cleanedImages().length === 0 ? "Step 2: Preprocess & Enhance Scans" : "Step 3: Generate AI DOCX Document"}
+                    {cleanedImages().length === 0
+                      ? "Step 2: Preprocess & Enhance Scans"
+                      : isCvStale()
+                      ? "Settings Changed — Ready to Re-apply or Generate DOCX"
+                      : "Step 3: Generate AI DOCX Document"}
                   </div>
                   <div class="footer-step-desc">
                     {cleanedImages().length === 0
                       ? "Runs OpenCV orientation, deskew, margin cleanup, and dual-page split."
+                      : isCvStale()
+                      ? "Your OpenCV settings were modified. Click 'Generate AI DOCX' to automatically re-enhance and compile, or 'Re-run OpenCV' to preview."
                       : "Sends enhanced scans to Gemini AI for OCR transcription and native Word DOCX generation."}
                   </div>
                 </div>
@@ -949,7 +1143,11 @@ export default function App() {
                   </Show>
                   <Show when={cleanedImages().length > 0}>
                     <button class="btn btn-secondary" onClick={runOpenCV} disabled={isProcessing()} title="Re-run with modified OpenCV settings">
-                      Re-run OpenCV
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style={{ width: "15px", height: "15px" }}>
+                        <polyline points="23 4 23 10 17 10" />
+                        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                      </svg>
+                      {isCvStale() ? "Re-apply OpenCV" : "Re-run OpenCV"}
                     </button>
                     <button class="btn btn-success" onClick={generateDocx} disabled={isProcessing()}>
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -969,23 +1167,89 @@ export default function App() {
       </main>
 
       {/* ==================================================================
-          Image Zoom Lightbox Modal
+          Image Zoom Lightbox Modal with Before/After Comparison
           ================================================================== */}
       <Show when={lightboxImg()}>
         <div class="modal-backdrop" onClick={() => setLightboxImg(null)}>
           <div class="lightbox-content" onClick={(e) => e.stopPropagation()}>
             <div class="lightbox-header">
-              <div class="lightbox-title">Scan Preview Inspection</div>
-              <button class="page-mini-btn" onClick={() => setLightboxImg(null)}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-              </button>
+              <div class="lightbox-title">
+                <span>🔍</span>
+                <span>Scan Inspection</span>
+                <Show when={cleanedImages().includes(lightboxImg()!)}>
+                  <span class="lightbox-badge">Enhanced (OpenCV)</span>
+                </Show>
+              </div>
+
+              <div class="lightbox-actions">
+                <button
+                  class="btn btn-secondary"
+                  style={{ padding: "6px 10px", "font-size": "0.78rem" }}
+                  onClick={async () => {
+                    const img = lightboxImg();
+                    if (img) {
+                      await invoke("rotate_page", { path: img, angle: -90 });
+                      setImageVersion(Date.now());
+                    }
+                  }}
+                  title="Rotate 90° CCW"
+                >
+                  ↺ Rotate CCW
+                </button>
+                <button
+                  class="btn btn-secondary"
+                  style={{ padding: "6px 10px", "font-size": "0.78rem" }}
+                  onClick={async () => {
+                    const img = lightboxImg();
+                    if (img) {
+                      await invoke("rotate_page", { path: img, angle: 90 });
+                      setImageVersion(Date.now());
+                    }
+                  }}
+                  title="Rotate 90° CW"
+                >
+                  ↻ Rotate CW
+                </button>
+
+                <Show when={cleanedImages().length > 0 && images().length > 0}>
+                  <button
+                    class="btn btn-secondary"
+                    style={{ padding: "6px 10px", "font-size": "0.78rem" }}
+                    onClick={() => setLightboxCompareMode(lightboxCompareMode() === "compare" ? "single" : "compare")}
+                  >
+                    {lightboxCompareMode() === "compare" ? "Single View" : "Compare Raw vs Enhanced"}
+                  </button>
+                </Show>
+
+                <button class="page-mini-btn" onClick={() => setLightboxImg(null)} title="Close">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
             </div>
-            <div class="lightbox-img-box">
-              <img src={`${convertFileSrc(lightboxImg()!)}?t=${Date.now()}`} alt="Zoomed Scan" />
-            </div>
+
+            <Show when={lightboxCompareMode() === "compare" && cleanedImages().length > 0 && images().length > 0} fallback={
+              <div class="lightbox-img-box">
+                <img src={`${convertFileSrc(lightboxImg()!)}?v=${imageVersion()}`} alt="Zoomed Scan" />
+              </div>
+            }>
+              <div class="lightbox-compare-grid">
+                <div class="lightbox-compare-col">
+                  <div class="compare-col-header">Original Raw Scan</div>
+                  <div class="lightbox-img-box">
+                    <img src={`${convertFileSrc(images()[0])}?v=${imageVersion()}`} alt="Original Scan" />
+                  </div>
+                </div>
+                <div class="lightbox-compare-col">
+                  <div class="compare-col-header">Enhanced (OpenCV Pipeline)</div>
+                  <div class="lightbox-img-box">
+                    <img src={`${convertFileSrc(cleanedImages()[0])}?v=${imageVersion()}`} alt="Enhanced Scan" />
+                  </div>
+                </div>
+              </div>
+            </Show>
           </div>
         </div>
       </Show>

@@ -1,0 +1,17 @@
+node_modules
+dist
+target
+src-tauri/target
+src-tauri/gen
+*.pkg.tar.zst
+*.deb
+*.AppImage
+*.rpm
+*.exe
+*.msi
+control.tar.*
+data.tar.*
+debian-binary
+arch_build
+aura_temp
+.DS_Store

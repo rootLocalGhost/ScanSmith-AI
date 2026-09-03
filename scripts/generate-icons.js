@@ -9,7 +9,7 @@ import fs from "fs";
 import path from "path";
 
 const rootDir = process.cwd();
-const svgSource = path.join(rootDir, "app-icon.svg");
+const svgSource = path.join(rootDir, "src", "assets", "logo.svg");
 const assetsLogo = path.join(rootDir, "src", "assets", "logo.svg");
 const publicLogo = path.join(rootDir, "public", "app-icon.svg");
 const publicTauri = path.join(rootDir, "public", "tauri.svg");

@@ -1,6 +1,6 @@
 {
   "name": "scansmith-ai",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Intelligent Document Digitizer & DOCX Synthesis Studio",
   "type": "module",
   "scripts": {

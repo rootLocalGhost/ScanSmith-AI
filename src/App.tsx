@@ -141,6 +141,7 @@ export default function App() {
   const [showHistoryDrawer, setShowHistoryDrawer] = createSignal(false);
   const [lightboxImg, setLightboxImg] = createSignal<string | null>(null);
   const [toasts, setToasts] = createSignal<ToastInfo[]>([]);
+  const [isMaximized, setIsMaximized] = createSignal(false);
 
   // History State
   const loadInitialHistory = (): HistoryItem[] => {
@@ -183,6 +184,22 @@ export default function App() {
 
   onMount(() => {
     document.documentElement.setAttribute("data-theme", theme());
+
+    // Initialize and track maximized window state
+    try {
+      const appWin = getCurrentWindow();
+      appWin.isMaximized().then(setIsMaximized).catch(() => {});
+      appWin.onResized(async () => {
+        try {
+          const max = await appWin.isMaximized();
+          setIsMaximized(max);
+        } catch {}
+      }).catch(() => {});
+    } catch {
+      invoke<boolean>("app_window_is_maximized")
+        .then(setIsMaximized)
+        .catch(() => {});
+    }
 
     listen("process-progress", (event: any) => {
       setProgressPct(event.payload.percent);
@@ -419,15 +436,28 @@ export default function App() {
     try {
       await getCurrentWindow().minimize();
     } catch (e) {
-      console.warn("Minimize error:", e);
+      console.warn("Direct window.minimize failed, falling back to invoke:", e);
+      try {
+        await invoke("app_window_minimize");
+      } catch (err) {
+        console.error("Failed to minimize window:", err);
+      }
     }
   };
 
   const handleMaximize = async () => {
     try {
       await getCurrentWindow().toggleMaximize();
+      const max = await getCurrentWindow().isMaximized();
+      setIsMaximized(max);
     } catch (e) {
-      console.warn("Maximize error:", e);
+      console.warn("Direct window.toggleMaximize failed, falling back to invoke:", e);
+      try {
+        const isMax = await invoke<boolean>("app_window_toggle_maximize");
+        setIsMaximized(isMax);
+      } catch (err) {
+        console.error("Failed to toggle maximize window:", err);
+      }
     }
   };
 
@@ -435,7 +465,12 @@ export default function App() {
     try {
       await getCurrentWindow().close();
     } catch (e) {
-      console.warn("Close error:", e);
+      console.warn("Direct window.close failed, falling back to invoke:", e);
+      try {
+        await invoke("app_window_close");
+      } catch (err) {
+        console.error("Failed to close window:", err);
+      }
     }
   };
 
@@ -463,7 +498,7 @@ export default function App() {
       {/* ==================================================================
           Top Header Bar / Custom Title Bar
           ================================================================== */}
-      <header class="header-navbar" data-tauri-drag-region>
+      <header class="header-navbar" data-tauri-drag-region onDblClick={handleMaximize}>
         <div class="brand-section" data-tauri-drag-region>
           <div class="brand-icon-box">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -554,17 +589,29 @@ export default function App() {
 
           {/* Custom Window Control Buttons */}
           <div class="window-controls-group">
-            <button class="window-btn" onClick={handleMinimize} title="Minimize Window">
+            <button class="window-btn" onClick={handleMinimize} title="Minimize Window" aria-label="Minimize Window">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
                 <line x1="5" y1="12" x2="19" y2="12" />
               </svg>
             </button>
-            <button class="window-btn" onClick={handleMaximize} title="Maximize / Restore Window">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                <rect x="5" y="5" width="14" height="14" rx="2" ry="2" />
-              </svg>
+            <button
+              class="window-btn"
+              onClick={handleMaximize}
+              title={isMaximized() ? "Restore Window" : "Expand / Maximize Window"}
+              aria-label={isMaximized() ? "Restore Window" : "Expand / Maximize Window"}
+            >
+              <Show when={isMaximized()} fallback={
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                  <rect x="5" y="5" width="14" height="14" rx="2" ry="2" />
+                </svg>
+              }>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                  <path d="M8 5h11a2 2 0 0 1 2 2v11" />
+                  <rect x="4" y="8" width="13" height="13" rx="2" ry="2" />
+                </svg>
+              </Show>
             </button>
-            <button class="window-btn close" onClick={handleClose} title="Close Window">
+            <button class="window-btn close" onClick={handleClose} title="Close Window" aria-label="Close Window">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
                 <line x1="18" y1="6" x2="6" y2="18" />
                 <line x1="6" y1="6" x2="18" y2="18" />

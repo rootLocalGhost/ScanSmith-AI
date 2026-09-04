@@ -2,11 +2,23 @@ import { createSignal, onMount, For, Show } from "solid-js";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 
 // Interface definitions
+interface PageCvOverride {
+  useCustom: boolean;
+  skipAll?: boolean;
+  split?: boolean;
+  orient?: boolean;
+  deskew?: boolean;
+  shadows?: boolean;
+  margins?: boolean;
+  denoise?: boolean;
+  mode?: "color" | "grayscale" | "bw" | "original";
+}
+
 interface PresetInfo {
   name: string;
   desc: string;
@@ -281,6 +293,87 @@ export default function App() {
     addToast("Removed page", "info");
   };
 
+  // Per-Image Overrides and Optimistic Rotation State
+  interface PageConfigTarget {
+    displayIdx: number;
+    rawIdx: number;
+    rawPath: string;
+  }
+
+  const [pageOverrides, setPageOverrides] = createSignal<{ [key: string]: PageCvOverride }>({});
+  const [configuringPage, setConfiguringPage] = createSignal<PageConfigTarget | null>(null);
+  const [rotationOffsets, setRotationOffsets] = createSignal<{ [path: string]: number }>({});
+
+  const getRawInfoForPage = (img: string, displayIdx: number): { rawIdx: number; rawPath: string } => {
+    if (viewMode() === "raw" || cleanedImages().length === 0) {
+      const rIdx = Math.min(displayIdx, Math.max(0, images().length - 1));
+      return { rawIdx: rIdx, rawPath: images()[rIdx] || img };
+    }
+    // Extract rawIdx from filename page_{rawIdx}_{subIdx}_...
+    const basename = img.split(/[\\/]/).pop() || "";
+    const match = basename.match(/^page_(\d+)_/i);
+    if (match) {
+      const parsed = parseInt(match[1], 10);
+      if (parsed >= 0 && parsed < images().length) {
+        return { rawIdx: parsed, rawPath: images()[parsed] };
+      }
+    }
+    const rIdx = Math.min(displayIdx, Math.max(0, images().length - 1));
+    return { rawIdx: rIdx, rawPath: images()[rIdx] || img };
+  };
+
+  const getPageOverride = (rawPath: string, rawIdx: number): PageCvOverride => {
+    const map = pageOverrides();
+    const found = map[rawIdx.toString()]
+      || (rawPath ? map[rawPath] : undefined)
+      || (rawPath ? map[rawPath.replace(/\\/g, "/")] : undefined)
+      || (rawPath ? map[rawPath.replace(/\//g, "\\")] : undefined);
+
+    if (found) return found;
+    return {
+      useCustom: false,
+      skipAll: false,
+      split: cvSplit(),
+      orient: cvOrient(),
+      deskew: cvDeskew(),
+      shadows: cvShadows(),
+      margins: cvMargins(),
+      denoise: cvDenoise(),
+      mode: cvFilterMode()
+    };
+  };
+
+  const updatePageOverride = (rawPath: string, rawIdx: number, patch: Partial<PageCvOverride>) => {
+    setPageOverrides(prev => {
+      const current = getPageOverride(rawPath, rawIdx);
+      const updated = { ...current, ...patch };
+      const next = { ...prev };
+      next[rawIdx.toString()] = updated;
+      if (rawPath) {
+        next[rawPath] = updated;
+        next[rawPath.replace(/\\/g, "/")] = updated;
+        next[rawPath.replace(/\//g, "\\")] = updated;
+      }
+      return next;
+    });
+    setIsCvStale(true);
+  };
+
+  const resetPageOverride = (rawPath: string, rawIdx: number) => {
+    setPageOverrides(prev => {
+      const next = { ...prev };
+      delete next[rawIdx.toString()];
+      if (rawPath) {
+        delete next[rawPath];
+        delete next[rawPath.replace(/\\/g, "/")];
+        delete next[rawPath.replace(/\//g, "\\")];
+      }
+      return next;
+    });
+    setIsCvStale(true);
+  };
+
+  // Instant optimistic rotation with asynchronous disk persistence
   const rotatePageItem = async (e: MouseEvent, index: number, angle: number) => {
     e.stopPropagation();
     const isCleaned = viewMode() === "cleaned" && cleanedImages().length > 0;
@@ -288,12 +381,86 @@ export default function App() {
     const targetImg = list[index];
     if (!targetImg) return;
 
+    // 1. Instant 0ms visual rotation feedback via CSS transform
+    setRotationOffsets(prev => ({
+      ...prev,
+      [targetImg]: (prev[targetImg] || 0) + angle
+    }));
+
+    // 2. Background persistence to disk
     try {
       await invoke("rotate_page", { path: targetImg, angle });
       setImageVersion(Date.now());
+      setRotationOffsets(prev => {
+        const next = { ...prev };
+        delete next[targetImg];
+        return next;
+      });
       addToast(`Rotated page ${index + 1} (${angle > 0 ? "+" : ""}${angle}°)`, "info");
     } catch (err: any) {
+      setRotationOffsets(prev => ({
+        ...prev,
+        [targetImg]: (prev[targetImg] || 0) - angle
+      }));
       addToast(`Rotation failed: ${err}`, "error", `${err}`);
+    }
+  };
+
+  // Export all processed (or currently viewed) images to a chosen folder
+  const exportProcessedImages = async () => {
+    const list = viewMode() === "cleaned" && cleanedImages().length > 0 ? cleanedImages() : (cleanedImages().length > 0 ? cleanedImages() : images());
+    if (list.length === 0) {
+      addToast("No images to export", "info");
+      return;
+    }
+
+    try {
+      const selectedDir = await openDialog({
+        directory: true,
+        multiple: false,
+        title: "Select Destination Folder to Export Images"
+      });
+
+      if (!selectedDir) return;
+      const targetDir = typeof selectedDir === "string" ? selectedDir : selectedDir[0];
+      if (!targetDir) return;
+
+      const prefix = outputFilename().trim() || "ScanSmith";
+      const exported: string[] = await invoke("export_processed_images", {
+        sources: list,
+        targetDir,
+        prefix
+      });
+
+      addToast(`Exported ${exported.length} images to ${targetDir}`, "success");
+    } catch (err: any) {
+      addToast(`Export failed: ${err}`, "error", `${err}`);
+    }
+  };
+
+  // Export a single image to a chosen location
+  const exportSingleImage = async (imgSrc: string) => {
+    try {
+      const defaultName = `${outputFilename().trim() || "ScanSmith"}_Page.png`;
+      const savePath = await saveDialog({
+        defaultPath: defaultName,
+        filters: [
+          { name: "PNG Image", extensions: ["png"] },
+          { name: "JPEG Image", extensions: ["jpg", "jpeg"] }
+        ],
+        title: "Save Image As"
+      });
+
+      if (!savePath) return;
+
+      await invoke("export_single_image", {
+        source: imgSrc,
+        destination: savePath
+      });
+
+      addToast("Image saved successfully", "success");
+    } catch (err: any) {
+      addToast(`Save failed: ${err}`, "error", `${err}`);
     }
   };
 
@@ -303,6 +470,9 @@ export default function App() {
     setOutputResult(null);
     setLastError(null);
     setIsCvStale(false);
+    setPageOverrides({});
+    setRotationOffsets({});
+    setConfiguringPage(null);
     addToast("Cleared all scans", "info");
   };
 
@@ -314,6 +484,18 @@ export default function App() {
     setProgressPct(5);
     setProgressMsg("Running OpenCV ScanTailor Optimization Pipeline...");
     try {
+      // Build comprehensive overrides payload mapped by raw index and paths
+      const overridesPayload: { [key: string]: PageCvOverride } = {};
+      images().forEach((img, idx) => {
+        const ov = getPageOverride(img, idx);
+        if (ov && ov.useCustom) {
+          overridesPayload[idx.toString()] = ov;
+          overridesPayload[img] = ov;
+          overridesPayload[img.replace(/\\/g, "/")] = ov;
+          overridesPayload[img.replace(/\//g, "\\")] = ov;
+        }
+      });
+
       const results: string[] = await invoke("preprocess_images", {
         imagePaths: images(),
         settings: {
@@ -323,7 +505,8 @@ export default function App() {
           margins: cvMargins(),
           shadows: cvShadows(),
           denoise: cvDenoise(),
-          mode: cvFilterMode()
+          mode: cvFilterMode(),
+          overrides: overridesPayload
         }
       });
       setCleanedImages(results);
@@ -1044,6 +1227,16 @@ export default function App() {
                   </svg>
                   Add More Scans
                 </button>
+                <Show when={cleanedImages().length > 0 || images().length > 0}>
+                  <button class="btn btn-secondary" onClick={exportProcessedImages} disabled={isProcessing()} title="Export scans to a local folder on your computer">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style={{ width: "15px", height: "15px" }}>
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                      <polyline points="7 10 12 15 17 10" />
+                      <line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                    Export Images
+                  </button>
+                </Show>
                 <button class="btn btn-danger-ghost" onClick={clearAllScans} disabled={isProcessing()}>
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <polyline points="3 6 5 6 21 6" />
@@ -1083,80 +1276,119 @@ export default function App() {
               {/* Grid of Pages */}
               <div class="gallery-grid">
                 <For each={activeDisplayImages()}>
-                  {(img, idx) => (
-                    <div class="page-card">
-                      <div class="page-card-header">
-                        <span class="page-number-badge">Page {idx() + 1}</span>
-                        <div class="page-actions-row">
-                          <button
-                            class="page-mini-btn"
-                            title="Rotate 90° CCW"
-                            disabled={isProcessing()}
-                            onClick={(e) => rotatePageItem(e, idx(), -90)}
-                          >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                              <polyline points="1 4 1 10 7 10" />
-                              <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
-                            </svg>
-                          </button>
-                          <button
-                            class="page-mini-btn"
-                            title="Rotate 90° CW"
-                            disabled={isProcessing()}
-                            onClick={(e) => rotatePageItem(e, idx(), 90)}
-                          >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                              <polyline points="23 4 23 10 17 10" />
-                              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-                            </svg>
-                          </button>
-                          <button
-                            class="page-mini-btn"
-                            title="Move Left"
-                            disabled={idx() === 0 || isProcessing()}
-                            onClick={(e) => { e.stopPropagation(); movePage(idx(), 'left'); }}
-                          >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                              <polyline points="15 18 9 12 15 6" />
-                            </svg>
-                          </button>
-                          <button
-                            class="page-mini-btn"
-                            title="Move Right"
-                            disabled={idx() === activeDisplayImages().length - 1 || isProcessing()}
-                            onClick={(e) => { e.stopPropagation(); movePage(idx(), 'right'); }}
-                          >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                              <polyline points="9 18 15 12 9 6" />
-                            </svg>
-                          </button>
-                          <button
-                            class="page-mini-btn delete"
-                            title="Remove Page"
-                            disabled={isProcessing()}
-                            onClick={(e) => { e.stopPropagation(); removePage(idx()); }}
-                          >
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                              <line x1="18" y1="6" x2="6" y2="18" />
-                              <line x1="6" y1="6" x2="18" y2="18" />
-                            </svg>
-                          </button>
-                        </div>
-                      </div>
+                  {(img, idx) => {
+                    const rawInfo = () => getRawInfoForPage(img, idx());
+                    const config = () => getPageOverride(rawInfo().rawPath, rawInfo().rawIdx);
+                    const isCustom = () => config().useCustom;
+                    const isRawSkip = () => config().skipAll;
 
-                      <div class="page-img-preview-box" onClick={() => setLightboxImg(img)}>
-                        <img src={`${convertFileSrc(img)}?v=${imageVersion()}`} alt={`Scan page ${idx() + 1}`} />
-                        <div class="page-zoom-overlay">
-                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style={{ width: "24px", height: "24px" }}>
-                            <circle cx="11" cy="11" r="8" />
-                            <line x1="21" y1="21" x2="16.65" y2="16.65" />
-                            <line x1="11" y1="8" x2="11" y2="14" />
-                            <line x1="8" y1="11" x2="14" y2="11" />
-                          </svg>
+                    return (
+                      <div class="page-card">
+                        <div class="page-card-header">
+                          <div style={{ display: "flex", "align-items": "center", gap: "6px" }}>
+                            <span class="page-number-badge">Page {idx() + 1}</span>
+                            <Show when={isCustom()}>
+                              <span class={`page-custom-badge ${isRawSkip() ? "raw" : ""}`}>
+                                {isRawSkip() ? "⚡ Raw" : "⚙️ Custom"}
+                              </span>
+                            </Show>
+                          </div>
+                          <div class="page-actions-row">
+                            <button
+                              class={`page-mini-btn ${isCustom() ? "active-override" : ""}`}
+                              title="Configure processing for this page only"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const info = rawInfo();
+                                setConfiguringPage({
+                                  displayIdx: idx(),
+                                  rawIdx: info.rawIdx,
+                                  rawPath: info.rawPath
+                                });
+                              }}
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <circle cx="12" cy="12" r="3" />
+                                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                              </svg>
+                            </button>
+                            <button
+                              class="page-mini-btn"
+                              title="Rotate 90° CCW"
+                              disabled={isProcessing()}
+                              onClick={(e) => rotatePageItem(e, idx(), -90)}
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="1 4 1 10 7 10" />
+                                <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+                              </svg>
+                            </button>
+                            <button
+                              class="page-mini-btn"
+                              title="Rotate 90° CW"
+                              disabled={isProcessing()}
+                              onClick={(e) => rotatePageItem(e, idx(), 90)}
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="23 4 23 10 17 10" />
+                                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                              </svg>
+                            </button>
+                            <button
+                              class="page-mini-btn"
+                              title="Move Left"
+                              disabled={idx() === 0 || isProcessing()}
+                              onClick={(e) => { e.stopPropagation(); movePage(idx(), 'left'); }}
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="15 18 9 12 15 6" />
+                              </svg>
+                            </button>
+                            <button
+                              class="page-mini-btn"
+                              title="Move Right"
+                              disabled={idx() === activeDisplayImages().length - 1 || isProcessing()}
+                              onClick={(e) => { e.stopPropagation(); movePage(idx(), 'right'); }}
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="9 18 15 12 9 6" />
+                              </svg>
+                            </button>
+                            <button
+                              class="page-mini-btn delete"
+                              title="Remove Page"
+                              disabled={isProcessing()}
+                              onClick={(e) => { e.stopPropagation(); removePage(idx()); }}
+                            >
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <line x1="18" y1="6" x2="6" y2="18" />
+                                <line x1="6" y1="6" x2="18" y2="18" />
+                              </svg>
+                            </button>
+                          </div>
+                        </div>
+
+                        <div class="page-img-preview-box" onClick={() => setLightboxImg(img)}>
+                          <img
+                            src={`${convertFileSrc(img)}?v=${imageVersion()}`}
+                            alt={`Scan page ${idx() + 1}`}
+                            style={{
+                              transform: `rotate(${rotationOffsets()[img] || 0}deg)`,
+                              transition: "transform 0.18s cubic-bezier(0.4, 0, 0.2, 1)"
+                            }}
+                          />
+                          <div class="page-zoom-overlay">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style={{ width: "24px", height: "24px" }}>
+                              <circle cx="11" cy="11" r="8" />
+                              <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                              <line x1="11" y1="8" x2="11" y2="14" />
+                              <line x1="8" y1="11" x2="14" y2="11" />
+                            </svg>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  )}
+                    );
+                  }}
                 </For>
               </div>
 
@@ -1187,6 +1419,14 @@ export default function App() {
                       </svg>
                       Run OpenCV Enhancements
                     </button>
+                    <button class="btn btn-secondary" onClick={exportProcessedImages} disabled={isProcessing()} title="Export raw scans to a folder">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style={{ width: "15px", height: "15px" }}>
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                      Save Images to Folder
+                    </button>
                   </Show>
                   <Show when={cleanedImages().length > 0}>
                     <button class="btn btn-secondary" onClick={runOpenCV} disabled={isProcessing()} title="Re-run with modified OpenCV settings">
@@ -1195,6 +1435,14 @@ export default function App() {
                         <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
                       </svg>
                       {isCvStale() ? "Re-apply OpenCV" : "Re-run OpenCV"}
+                    </button>
+                    <button class="btn btn-secondary" onClick={exportProcessedImages} disabled={isProcessing()} title="Save enhanced images directly to a folder on your computer">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style={{ width: "15px", height: "15px" }}>
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                      Save Images to Folder
                     </button>
                     <button class="btn btn-success" onClick={generateDocx} disabled={isProcessing()}>
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1232,12 +1480,29 @@ export default function App() {
                 <button
                   class="btn btn-secondary"
                   style={{ padding: "6px 10px", "font-size": "0.78rem" }}
-                  onClick={async () => {
+                  onClick={() => {
                     const img = lightboxImg();
-                    if (img) {
-                      await invoke("rotate_page", { path: img, angle: -90 });
-                      setImageVersion(Date.now());
-                    }
+                    if (!img) return;
+                    setRotationOffsets(prev => ({
+                      ...prev,
+                      [img]: (prev[img] || 0) - 90
+                    }));
+                    invoke("rotate_page", { path: img, angle: -90 })
+                      .then(() => {
+                        setImageVersion(Date.now());
+                        setRotationOffsets(prev => {
+                          const next = { ...prev };
+                          delete next[img];
+                          return next;
+                        });
+                      })
+                      .catch((err) => {
+                        setRotationOffsets(prev => ({
+                          ...prev,
+                          [img]: (prev[img] || 0) + 90
+                        }));
+                        addToast(`Rotation failed: ${err}`, "error", `${err}`);
+                      });
                   }}
                   title="Rotate 90° CCW"
                 >
@@ -1246,16 +1511,47 @@ export default function App() {
                 <button
                   class="btn btn-secondary"
                   style={{ padding: "6px 10px", "font-size": "0.78rem" }}
-                  onClick={async () => {
+                  onClick={() => {
                     const img = lightboxImg();
-                    if (img) {
-                      await invoke("rotate_page", { path: img, angle: 90 });
-                      setImageVersion(Date.now());
-                    }
+                    if (!img) return;
+                    setRotationOffsets(prev => ({
+                      ...prev,
+                      [img]: (prev[img] || 0) + 90
+                    }));
+                    invoke("rotate_page", { path: img, angle: 90 })
+                      .then(() => {
+                        setImageVersion(Date.now());
+                        setRotationOffsets(prev => {
+                          const next = { ...prev };
+                          delete next[img];
+                          return next;
+                        });
+                      })
+                      .catch((err) => {
+                        setRotationOffsets(prev => ({
+                          ...prev,
+                          [img]: (prev[img] || 0) - 90
+                        }));
+                        addToast(`Rotation failed: ${err}`, "error", `${err}`);
+                      });
                   }}
                   title="Rotate 90° CW"
                 >
                   ↻ Rotate CW
+                </button>
+
+                <button
+                  class="btn btn-secondary"
+                  style={{ padding: "6px 10px", "font-size": "0.78rem" }}
+                  onClick={() => exportSingleImage(lightboxImg()!)}
+                  title="Save this image to your computer"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style={{ width: "13px", height: "13px", "margin-right": "4px" }}>
+                    <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+                    <polyline points="17 21 17 13 7 13 7 21" />
+                    <polyline points="7 3 7 8 15 8" />
+                  </svg>
+                  Save Image As...
                 </button>
 
                 <Show when={cleanedImages().length > 0 && images().length > 0}>
@@ -1279,26 +1575,239 @@ export default function App() {
 
             <Show when={lightboxCompareMode() === "compare" && cleanedImages().length > 0 && images().length > 0} fallback={
               <div class="lightbox-img-box">
-                <img src={`${convertFileSrc(lightboxImg()!)}?v=${imageVersion()}`} alt="Zoomed Scan" />
+                <img
+                  src={`${convertFileSrc(lightboxImg()!)}?v=${imageVersion()}`}
+                  alt="Zoomed Scan"
+                  style={{
+                    transform: `rotate(${rotationOffsets()[lightboxImg()!] || 0}deg)`,
+                    transition: "transform 0.18s cubic-bezier(0.4, 0, 0.2, 1)"
+                  }}
+                />
               </div>
             }>
-              <div class="lightbox-compare-grid">
-                <div class="lightbox-compare-col">
-                  <div class="compare-col-header">Original Raw Scan</div>
-                  <div class="lightbox-img-box">
-                    <img src={`${convertFileSrc(images()[0])}?v=${imageVersion()}`} alt="Original Scan" />
+              {(() => {
+                const current = lightboxImg();
+                const curIdx = current ? (cleanedImages().indexOf(current) !== -1 ? cleanedImages().indexOf(current) : Math.max(0, images().indexOf(current))) : 0;
+                const rawImg = images()[curIdx] || images()[0];
+                const cleanedImg = cleanedImages()[curIdx] || cleanedImages()[0];
+                return (
+                  <div class="lightbox-compare-grid">
+                    <div class="lightbox-compare-col">
+                      <div class="compare-col-header">Original Raw Scan (Page {curIdx + 1})</div>
+                      <div class="lightbox-img-box">
+                        <img src={`${convertFileSrc(rawImg)}?v=${imageVersion()}`} alt="Original Scan" />
+                      </div>
+                    </div>
+                    <div class="lightbox-compare-col">
+                      <div class="compare-col-header">Enhanced (Page {curIdx + 1})</div>
+                      <div class="lightbox-img-box">
+                        <img src={`${convertFileSrc(cleanedImg)}?v=${imageVersion()}`} alt="Enhanced Scan" />
+                      </div>
+                    </div>
                   </div>
-                </div>
-                <div class="lightbox-compare-col">
-                  <div class="compare-col-header">Enhanced (OpenCV Pipeline)</div>
-                  <div class="lightbox-img-box">
-                    <img src={`${convertFileSrc(cleanedImages()[0])}?v=${imageVersion()}`} alt="Enhanced Scan" />
-                  </div>
-                </div>
-              </div>
+                );
+              })()}
             </Show>
           </div>
         </div>
+      </Show>
+
+      {/* ==================================================================
+          Per-Page Processing Override Modal
+          ================================================================== */}
+      <Show when={configuringPage() !== null}>
+        {(() => {
+          const target = configuringPage()!;
+          const currentConfig = () => getPageOverride(target.rawPath, target.rawIdx);
+          const filename = target.rawPath.split(/[\\/]/).pop() || `Page ${target.displayIdx + 1}`;
+
+          return (
+            <div class="modal-backdrop" onClick={() => setConfiguringPage(null)}>
+              <div class="modal-card page-config-modal" onClick={(e) => e.stopPropagation()}>
+                <div class="modal-header">
+                  <div class="modal-title-row">
+                    <span class="modal-icon">⚙️</span>
+                    <div>
+                      <div class="modal-title">Page {target.displayIdx + 1} Processing Settings</div>
+                      <div class="modal-subtitle">
+                        Source scan: {filename} • Override OpenCV optimization for this scan
+                      </div>
+                    </div>
+                  </div>
+                  <button class="modal-close-btn" onClick={() => setConfiguringPage(null)}>✕</button>
+                </div>
+
+                <div class="modal-body">
+                  {/* Master toggle for this page */}
+                  <div class="toggle-row page-override-master">
+                    <div class="toggle-info">
+                      <div class="toggle-name">Custom Settings for Page {target.displayIdx + 1}</div>
+                      <div class="toggle-desc">Enable to override global sidebar settings for this page</div>
+                    </div>
+                    <label class="switch">
+                      <input
+                        type="checkbox"
+                        checked={currentConfig().useCustom}
+                        onChange={(e) => updatePageOverride(target.rawPath, target.rawIdx, { useCustom: e.currentTarget.checked })}
+                      />
+                      <span class="slider"></span>
+                    </label>
+                  </div>
+
+                  <Show when={currentConfig().useCustom}>
+                    {/* Skip All Toggle */}
+                    <div class="override-skip-card" classList={{ active: currentConfig().skipAll }}>
+                      <div class="override-skip-header">
+                        <label style={{ "font-weight": "700", cursor: "pointer", display: "flex", "align-items": "center", gap: "8px" }}>
+                          <input
+                            type="checkbox"
+                            checked={currentConfig().skipAll || false}
+                            onChange={(e) => updatePageOverride(target.rawPath, target.rawIdx, { skipAll: e.currentTarget.checked })}
+                          />
+                          <span>⚡ Skip All Processing (Keep 100% Raw Original)</span>
+                        </label>
+                      </div>
+                      <div class="setting-hint" style={{ "margin-left": "24px", "margin-top": "4px" }}>
+                        Bypasses all OpenCV steps (no deskew, no margins, no color filter). Uses raw input directly.
+                      </div>
+                    </div>
+
+                    <Show when={!currentConfig().skipAll}>
+                      <div class="page-toggles-grid">
+                        <div class="toggle-row mini">
+                          <div class="toggle-info">
+                            <div class="toggle-name">📖 Split Dual-Page Spreads</div>
+                            <div class="toggle-desc">Cut book fold into two pages</div>
+                          </div>
+                          <label class="switch">
+                            <input
+                              type="checkbox"
+                              checked={currentConfig().split !== false}
+                              onChange={(e) => updatePageOverride(target.rawPath, target.rawIdx, { split: e.currentTarget.checked })}
+                            />
+                            <span class="slider"></span>
+                          </label>
+                        </div>
+
+                        <div class="toggle-row mini">
+                          <div class="toggle-info">
+                            <div class="toggle-name">🔄 Auto Orientation</div>
+                            <div class="toggle-desc">Rotate upside-down pages upright</div>
+                          </div>
+                          <label class="switch">
+                            <input
+                              type="checkbox"
+                              checked={currentConfig().orient !== false}
+                              onChange={(e) => updatePageOverride(target.rawPath, target.rawIdx, { orient: e.currentTarget.checked })}
+                            />
+                            <span class="slider"></span>
+                          </label>
+                        </div>
+
+                        <div class="toggle-row mini">
+                          <div class="toggle-info">
+                            <div class="toggle-name">📐 Auto Deskew Slant</div>
+                            <div class="toggle-desc">Correct text line tilt/angle</div>
+                          </div>
+                          <label class="switch">
+                            <input
+                              type="checkbox"
+                              checked={currentConfig().deskew !== false}
+                              onChange={(e) => updatePageOverride(target.rawPath, target.rawIdx, { deskew: e.currentTarget.checked })}
+                            />
+                            <span class="slider"></span>
+                          </label>
+                        </div>
+
+                        <div class="toggle-row mini">
+                          <div class="toggle-info">
+                            <div class="toggle-name">🌓 Shadow & Crease Removal</div>
+                            <div class="toggle-desc">Eliminate spine shadow gradients</div>
+                          </div>
+                          <label class="switch">
+                            <input
+                              type="checkbox"
+                              checked={currentConfig().shadows !== false}
+                              onChange={(e) => updatePageOverride(target.rawPath, target.rawIdx, { shadows: e.currentTarget.checked })}
+                            />
+                            <span class="slider"></span>
+                          </label>
+                        </div>
+
+                        <div class="toggle-row mini">
+                          <div class="toggle-info">
+                            <div class="toggle-name">✂️ Crop Margins</div>
+                            <div class="toggle-desc">Trim outside border to content</div>
+                          </div>
+                          <label class="switch">
+                            <input
+                              type="checkbox"
+                              checked={currentConfig().margins !== false}
+                              onChange={(e) => updatePageOverride(target.rawPath, target.rawIdx, { margins: e.currentTarget.checked })}
+                            />
+                            <span class="slider"></span>
+                          </label>
+                        </div>
+
+                        <div class="toggle-row mini">
+                          <div class="toggle-info">
+                            <div class="toggle-name">✨ Denoise & Despeckle</div>
+                            <div class="toggle-desc">Fast bilateral noise smoothing</div>
+                          </div>
+                          <label class="switch">
+                            <input
+                              type="checkbox"
+                              checked={currentConfig().denoise === true}
+                              onChange={(e) => updatePageOverride(target.rawPath, target.rawIdx, { denoise: e.currentTarget.checked })}
+                            />
+                            <span class="slider"></span>
+                          </label>
+                        </div>
+                      </div>
+
+                      {/* Filter Mode Selector */}
+                      <div class="page-mode-section">
+                        <label class="setting-label">Enhancement Filter Mode for Page {target.displayIdx + 1}</label>
+                        <div class="filter-mode-grid mini">
+                          {(["color", "grayscale", "bw", "original"] as const).map((m) => (
+                            <button
+                              class={`filter-mode-chip ${currentConfig().mode === m ? "active" : ""}`}
+                              onClick={() => updatePageOverride(target.rawPath, target.rawIdx, { mode: m })}
+                            >
+                              {m === "color" && "🎨 Color"}
+                              {m === "grayscale" && "⚪ Gray"}
+                              {m === "bw" && "⬛ B&W"}
+                              {m === "original" && "📷 Raw"}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </Show>
+                  </Show>
+                </div>
+
+                <div class="modal-footer">
+                  <Show when={currentConfig().useCustom}>
+                    <button class="btn btn-secondary" onClick={() => {
+                      resetPageOverride(target.rawPath, target.rawIdx);
+                      addToast(`Reset Page ${target.displayIdx + 1} to global settings`, "info");
+                    }}>
+                      Reset to Defaults
+                    </button>
+                  </Show>
+                  <button class="btn btn-primary" onClick={() => {
+                    setConfiguringPage(null);
+                    if (currentConfig().useCustom) {
+                      addToast(`Configured custom settings for Page ${target.displayIdx + 1}. Click 'Re-apply OpenCV' to process.`, "success");
+                    }
+                  }}>
+                    Done
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
       </Show>
 
       {/* ==================================================================

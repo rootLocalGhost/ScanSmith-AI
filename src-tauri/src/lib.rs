@@ -1,5 +1,6 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use docx_rs::*;
+use image::ImageEncoder;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -305,14 +306,102 @@ async fn preprocess_images(
         let out = out_dir.clone();
         let window_clone = window.clone();
         let counter_clone = completed.clone();
-        let (s, o, d, m, sh, dn, md) = (
-            split.to_string(),
-            orient.to_string(),
-            deskew.to_string(),
-            margins.to_string(),
-            shadows.to_string(),
-            denoise.to_string(),
-            mode.to_string(),
+
+        let overrides_obj = settings.get("overrides").and_then(|v| v.as_object());
+
+        let page_override = overrides_obj.and_then(|map| {
+            let idx_key = idx.to_string();
+            let p_fwd = path.replace('\\', "/");
+            let p_back = path.replace('/', "\\");
+
+            map.get(&idx_key)
+                .or_else(|| map.get(&path))
+                .or_else(|| map.get(&p_fwd))
+                .or_else(|| map.get(&p_back))
+                .or_else(|| {
+                    let filename = std::path::Path::new(&path).file_name().and_then(|f| f.to_str());
+                    map.iter().find_map(|(k, v)| {
+                        if k == &idx_key || k.eq_ignore_ascii_case(&path) || k.eq_ignore_ascii_case(&p_fwd) || k.eq_ignore_ascii_case(&p_back) {
+                            Some(v)
+                        } else if let Some(fname) = filename {
+                            if std::path::Path::new(k).file_name().and_then(|f| f.to_str()) == Some(fname) {
+                                Some(v)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                })
+        });
+
+        let use_custom = page_override
+            .and_then(|po| po.get("useCustom"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let skip_all = use_custom && page_override
+            .and_then(|po| po.get("skipAll"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Clean up any previous output files for this specific page index
+        if let Ok(entries) = std::fs::read_dir(&out) {
+            let prefix = format!("page_{}_", idx);
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.starts_with(&prefix) {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+
+        if skip_all {
+            eprintln!("[OpenCV Task] Page idx={}: Preserving RAW scan (skip all processing)", idx);
+            let p_clone = path.clone();
+            tasks.push(tokio::task::spawn_blocking(move || {
+                let ext = std::path::Path::new(&p_clone)
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("png");
+                let out_name = out.join(format!("page_{}_0_raw.{}", idx, ext));
+                std::fs::copy(&p_clone, &out_name)
+                    .map_err(|e| format!("Failed to copy raw image: {}", e))?;
+
+                let cur = counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                let pct = (cur as f32 / total) * 90.0;
+                let _ = window_clone.emit("process-progress", Progress {
+                    percent: pct,
+                    message: format!("Page {}/{} (Raw scan preserved)", cur, total as usize),
+                });
+
+                Ok(vec![out_name.to_string_lossy().to_string()])
+            }));
+            continue;
+        }
+
+        let (s, o, d, m, sh, dn, md) = if use_custom {
+            if let Some(po) = page_override {
+                let s_val = po.get("split").and_then(|v| v.as_bool()).map(|b| if b { "1" } else { "0" }).unwrap_or(split);
+                let o_val = po.get("orient").and_then(|v| v.as_bool()).map(|b| if b { "1" } else { "0" }).unwrap_or(orient);
+                let d_val = po.get("deskew").and_then(|v| v.as_bool()).map(|b| if b { "1" } else { "0" }).unwrap_or(deskew);
+                let m_val = po.get("margins").and_then(|v| v.as_bool()).map(|b| if b { "1" } else { "0" }).unwrap_or(margins);
+                let sh_val = po.get("shadows").and_then(|v| v.as_bool()).map(|b| if b { "1" } else { "0" }).unwrap_or(shadows);
+                let dn_val = po.get("denoise").and_then(|v| v.as_bool()).map(|b| if b { "1" } else { "0" }).unwrap_or(denoise);
+                let md_val = po.get("mode").and_then(|v| v.as_str()).unwrap_or(mode);
+                (s_val.to_string(), o_val.to_string(), d_val.to_string(), m_val.to_string(), sh_val.to_string(), dn_val.to_string(), md_val.to_string())
+            } else {
+                (split.to_string(), orient.to_string(), deskew.to_string(), margins.to_string(), shadows.to_string(), denoise.to_string(), mode.to_string())
+            }
+        } else {
+            (split.to_string(), orient.to_string(), deskew.to_string(), margins.to_string(), shadows.to_string(), denoise.to_string(), mode.to_string())
+        };
+
+        eprintln!(
+            "[OpenCV Task] Page idx={}: use_custom={}, split={}, orient={}, deskew={}, margins={}, shadows={}, denoise={}, mode={}",
+            idx, use_custom, s, o, d, m, sh, dn, md
         );
 
         tasks.push(tokio::task::spawn_blocking(move || {
@@ -731,16 +820,138 @@ async fn generate_docx(
 }
 
 #[tauri::command]
-fn rotate_page(path: String, angle: i32) -> Result<String, String> {
-    let img = image::open(&path).map_err(|e| format!("Failed to open image for rotation: {}", e))?;
-    let rotated = match angle {
-        90 => img.rotate90(),
-        180 => img.rotate180(),
-        270 | -90 => img.rotate270(),
-        _ => img,
-    };
-    rotated.save(&path).map_err(|e| format!("Failed to save rotated image: {}", e))?;
-    Ok(path)
+async fn rotate_page(path: String, angle: i32) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let path_buf = std::path::PathBuf::from(&path);
+        let img = image::open(&path_buf).map_err(|e| format!("Failed to open image for rotation: {}", e))?;
+        let rotated = match angle {
+            90 => img.rotate90(),
+            180 => img.rotate180(),
+            270 | -90 => img.rotate270(),
+            _ => img,
+        };
+
+        let ext = path_buf
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        if ext == "png" {
+            let file = std::fs::File::create(&path_buf).map_err(|e| format!("Failed to create file: {}", e))?;
+            let mut writer = std::io::BufWriter::with_capacity(512 * 1024, file);
+            let encoder = image::codecs::png::PngEncoder::new_with_quality(
+                &mut writer,
+                image::codecs::png::CompressionType::Fast,
+                image::codecs::png::FilterType::NoFilter,
+            );
+            encoder.write_image(
+                rotated.as_bytes(),
+                rotated.width(),
+                rotated.height(),
+                rotated.color().into(),
+            ).map_err(|e| format!("Failed to encode PNG: {}", e))?;
+        } else if ext == "jpg" || ext == "jpeg" {
+            let file = std::fs::File::create(&path_buf).map_err(|e| format!("Failed to create file: {}", e))?;
+            let mut writer = std::io::BufWriter::with_capacity(512 * 1024, file);
+            let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut writer, 92);
+            encoder.write_image(
+                rotated.as_bytes(),
+                rotated.width(),
+                rotated.height(),
+                rotated.color().into(),
+            ).map_err(|e| format!("Failed to encode JPEG: {}", e))?;
+        } else {
+            rotated.save(&path_buf).map_err(|e| format!("Failed to save rotated image: {}", e))?;
+        }
+
+        Ok(path)
+    })
+    .await
+    .map_err(|e| format!("Rotation task failed: {}", e))?
+}
+
+#[tauri::command]
+async fn export_processed_images(
+    sources: Vec<String>,
+    target_dir: String,
+    prefix: Option<String>,
+) -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        let dest_dir = std::path::PathBuf::from(&target_dir);
+        if !dest_dir.exists() {
+            std::fs::create_dir_all(&dest_dir)
+                .map_err(|e| format!("Failed to create destination directory: {}", e))?;
+        }
+
+        let clean_prefix = prefix
+            .unwrap_or_else(|| "ScanSmith_Page".to_string())
+            .trim()
+            .to_string();
+        let base_prefix = if clean_prefix.is_empty() {
+            "ScanSmith_Page"
+        } else {
+            &clean_prefix
+        };
+
+        let mut exported = Vec::new();
+        let total = sources.len();
+
+        for (i, src_str) in sources.iter().enumerate() {
+            let src_path = std::path::PathBuf::from(src_str);
+            if !src_path.exists() {
+                continue;
+            }
+
+            let ext = src_path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("png");
+
+            let digits = if total >= 100 { 3 } else { 2 };
+            let filename = format!("{}_{:0digits$}.{}", base_prefix, i + 1, ext, digits = digits);
+            let dest_path = dest_dir.join(filename);
+
+            std::fs::copy(&src_path, &dest_path)
+                .map_err(|e| format!("Failed to copy {:?} to {:?}: {}", src_path, dest_path, e))?;
+
+            exported.push(dest_path.to_string_lossy().to_string());
+        }
+
+        if exported.is_empty() {
+            return Err("No images were exported.".to_string());
+        }
+
+        Ok(exported)
+    })
+    .await
+    .map_err(|e| format!("Export task failed: {}", e))?
+}
+
+#[tauri::command]
+async fn export_single_image(source: String, destination: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let src_path = std::path::PathBuf::from(&source);
+        let dest_path = std::path::PathBuf::from(&destination);
+
+        if !src_path.exists() {
+            return Err(format!("Source image does not exist: {}", source));
+        }
+
+        if let Some(parent) = dest_path.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create parent directory: {}", e))?;
+            }
+        }
+
+        std::fs::copy(&src_path, &dest_path)
+            .map_err(|e| format!("Failed to save image to {}: {}", destination, e))?;
+
+        Ok(destination)
+    })
+    .await
+    .map_err(|e| format!("Save image task failed: {}", e))?
 }
 
 #[tauri::command]
@@ -780,6 +991,8 @@ pub fn run() {
             generate_docx,
             open_document,
             rotate_page,
+            export_processed_images,
+            export_single_image,
             app_window_minimize,
             app_window_toggle_maximize,
             app_window_close,

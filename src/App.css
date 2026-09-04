@@ -152,6 +152,22 @@ body {
   flex-shrink: 0;
   z-index: 50;
   box-shadow: 0 4px 0px rgba(0, 0, 0, 0.03);
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+[data-tauri-drag-region] {
+  -webkit-app-region: drag;
+}
+
+.brand-icon-box,
+.stepper-nav,
+.header-actions,
+.api-status-pill,
+.icon-btn,
+.window-controls-group,
+.window-btn {
+  -webkit-app-region: no-drag;
 }
 
 .brand-section {
@@ -283,6 +299,7 @@ body {
   margin-left: 6px;
   padding-left: 12px;
   border-left: 2px solid var(--border-color);
+  -webkit-app-region: no-drag;
 }
 
 .window-btn {
@@ -302,6 +319,10 @@ body {
   font-weight: 800;
   transition: all 0.1s var(--anim-snappy);
   user-select: none;
+  -webkit-app-region: no-drag;
+  pointer-events: auto;
+  position: relative;
+  z-index: 60;
 }
 
 .window-btn:hover {
@@ -318,13 +339,15 @@ body {
 .window-btn.close:hover {
   background: var(--neo-coral);
   color: #ffffff;
+  border-color: var(--border-color);
 }
 
 .window-btn svg {
   width: 15px;
   height: 15px;
   stroke: currentColor;
-  stroke-width: 2.5;
+  stroke-width: 2.2;
+  pointer-events: none;
 }
 
 .api-status-pill {

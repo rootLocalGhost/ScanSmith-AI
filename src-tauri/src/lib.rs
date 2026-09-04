@@ -697,6 +697,33 @@ fn rotate_page(path: String, angle: i32) -> Result<String, String> {
     Ok(path)
 }
 
+#[tauri::command]
+fn app_window_minimize(window: tauri::Window) -> Result<(), String> {
+    window.minimize().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn app_window_toggle_maximize(window: tauri::Window) -> Result<bool, String> {
+    let is_max = window.is_maximized().map_err(|e| e.to_string())?;
+    if is_max {
+        window.unmaximize().map_err(|e| e.to_string())?;
+        Ok(false)
+    } else {
+        window.maximize().map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+}
+
+#[tauri::command]
+fn app_window_close(window: tauri::Window) -> Result<(), String> {
+    window.close().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn app_window_is_maximized(window: tauri::Window) -> Result<bool, String> {
+    window.is_maximized().map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -706,7 +733,11 @@ pub fn run() {
             preprocess_images,
             generate_docx,
             open_document,
-            rotate_page
+            rotate_page,
+            app_window_minimize,
+            app_window_toggle_maximize,
+            app_window_close,
+            app_window_is_maximized
         ])
         .run(tauri::generate_context!())
         .expect("error while running app");

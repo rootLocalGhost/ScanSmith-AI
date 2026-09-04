@@ -33,6 +33,32 @@ except ImportError as e:
     }))
     sys.exit(0)
 
+def imread_unicode(path):
+    """Safely read image files supporting Windows Unicode paths and long paths"""
+    try:
+        data = np.fromfile(path, dtype=np.uint8)
+        img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        if img is not None:
+            return img
+    except Exception:
+        pass
+    return cv2.imread(path)
+
+def imwrite_unicode(path, image):
+    """Safely write image files supporting Windows Unicode paths and long paths"""
+    try:
+        ext = os.path.splitext(path)[1]
+        if not ext:
+            ext = ".png"
+        success, buffer = cv2.imencode(ext, image)
+        if success:
+            with open(path, "wb") as f:
+                f.write(buffer)
+            return True
+    except Exception:
+        pass
+    return cv2.imwrite(path, image)
+
 # Check Windows and Unix paths for tesseract binary
 def find_tesseract_binary():
     bin_path = shutil.which("tesseract")
@@ -64,65 +90,69 @@ TESSERACT_BIN = find_tesseract_binary()
 
 def detect_orientation_tesseract(image):
     """Detect rotation angle needed using Tesseract OSD (0, 90, 180, 270)"""
-    # Downsample if image is huge to speed up OSD detection (max dimension 1600px)
-    h, w = image.shape[:2]
-    max_dim = max(h, w)
-    if max_dim > 1600:
-        scale = 1600.0 / max_dim
-        proc_img = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-    else:
-        proc_img = image
+    try:
+        # Downsample if image is huge to speed up OSD detection (max dimension 1600px)
+        h, w = image.shape[:2]
+        max_dim = max(h, w)
+        if max_dim > 1600:
+            scale = 1600.0 / max_dim
+            proc_img = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        else:
+            proc_img = image
 
-    # Method 1: Direct tesseract CLI (fastest and most reliable without python bindings)
-    if TESSERACT_BIN:
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-                tmp_path = tmp.name
-                cv2.imwrite(tmp_path, proc_img)
-            
-            subp_kwargs = {}
-            if sys.platform == "win32":
-                subp_kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
-            
+        # Method 1: Direct tesseract CLI (fastest and most reliable without python bindings)
+        if TESSERACT_BIN:
+            tmp_path = None
             try:
-                res = subprocess.run(
-                    [TESSERACT_BIN, tmp_path, "stdout", "--psm", "0"],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                    **subp_kwargs
-                )
-                output = res.stdout
-                for line in output.splitlines():
-                    if "Rotate:" in line:
-                        rot_str = line.split("Rotate:")[1].strip().split()[0]
-                        angle = int(rot_str)
-                        return angle
-                    elif "Orientation in degrees:" in line:
-                        deg_str = line.split("Orientation in degrees:")[1].strip().split()[0]
-                        deg = int(deg_str)
-                        # Orientation in degrees: 90 means image is rotated 90 deg clockwise -> needs 270 rotate
-                        if deg == 90:
-                            return 270
-                        elif deg == 180:
-                            return 180
-                        elif deg == 270:
-                            return 90
+                tmp_fd, tmp_path = tempfile.mkstemp(suffix=".png")
+                os.close(tmp_fd)
+                if imwrite_unicode(tmp_path, proc_img):
+                    subp_kwargs = {}
+                    if sys.platform == "win32":
+                        subp_kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+                    
+                    res = subprocess.run(
+                        [TESSERACT_BIN, tmp_path, "stdout", "--psm", "0"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        **subp_kwargs
+                    )
+                    output = res.stdout or ""
+                    for line in output.splitlines():
+                        if "Rotate:" in line:
+                            rot_str = line.split("Rotate:")[1].strip().split()[0]
+                            return int(rot_str)
+                        elif "Orientation in degrees:" in line:
+                            deg_str = line.split("Orientation in degrees:")[1].strip().split()[0]
+                            deg = int(deg_str)
+                            if deg == 90:
+                                return 270
+                            elif deg == 180:
+                                return 180
+                            elif deg == 270:
+                                return 90
+            except Exception:
+                pass
             finally:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-        except Exception:
-            pass
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
 
-    # Method 2: pytesseract if installed
-    if HAS_PYTESSERACT:
+        # Method 2: pytesseract if installed
         try:
+            import pytesseract
             osd = pytesseract.image_to_osd(proc_img)
             if "Rotate: " in osd:
                 angle = int(osd.split("Rotate: ")[1].split("\n")[0].strip())
                 return angle
         except Exception:
             pass
+
+    except Exception:
+        pass
 
     return 0
 
@@ -151,18 +181,21 @@ def detect_orientation_gradient_fallback(image):
 
 def fix_orientation(image):
     """Rotates image to upright reading orientation"""
-    angle = detect_orientation_tesseract(image)
-    if angle == 0:
-        angle = detect_orientation_gradient_fallback(image)
-        
-    # Tesseract 'Rotate: 90' means current orientation is CW 90 -> needs CCW 90 to restore upright
-    # Tesseract 'Rotate: 270' means current orientation is CCW 90 -> needs CW 90 to restore upright
-    if angle == 90:
-        return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
-    elif angle == 180:
-        return cv2.rotate(image, cv2.ROTATE_180)
-    elif angle == 270:
-        return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+    try:
+        angle = detect_orientation_tesseract(image)
+        if angle == 0:
+            angle = detect_orientation_gradient_fallback(image)
+            
+        # Tesseract 'Rotate: 90' means current orientation is CW 90 -> needs CCW 90 to restore upright
+        # Tesseract 'Rotate: 270' means current orientation is CCW 90 -> needs CW 90 to restore upright
+        if angle == 90:
+            return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        elif angle == 180:
+            return cv2.rotate(image, cv2.ROTATE_180)
+        elif angle == 270:
+            return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+    except Exception:
+        pass
     return image
 
 def split_page(image):
@@ -446,12 +479,25 @@ def remove_shadows(image):
         return image
 
 def despeckle_image(image):
-    """Removes isolated dust specks and scanner noise"""
+    """
+    Fast edge-preserving document denoise and despeckle filter.
+    Smooths scanner grain and sensor noise in uniform paper areas
+    while strictly preserving crisp high-contrast text and ink edges.
+    Runs in tens of milliseconds instead of dozens of seconds.
+    """
     try:
-        if len(image.shape) == 3:
-            return cv2.fastNlMeansDenoisingColored(image, None, 6, 6, 7, 21)
-        else:
-            return cv2.fastNlMeansDenoising(image, None, 6, 7, 21)
+        if image is None:
+            return image
+
+        # Handle 4-channel BGRA images
+        if len(image.shape) == 3 and image.shape[2] == 4:
+            bgr = image[:, :, :3]
+            alpha = image[:, :, 3]
+            denoised = cv2.bilateralFilter(bgr, d=7, sigmaColor=35, sigmaSpace=35)
+            return cv2.merge([denoised, alpha])
+
+        # 3-channel BGR or 1-channel Grayscale
+        return cv2.bilateralFilter(image, d=7, sigmaColor=35, sigmaSpace=35)
     except Exception:
         return image
 
@@ -507,49 +553,71 @@ def process_image(input_path, output_dir, idx, do_split, do_orient, do_deskew, d
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Input image not found: {input_path}")
 
-    image = cv2.imread(input_path)
+    image = imread_unicode(input_path)
     if image is None:
         raise ValueError(f"Could not read image file format: {input_path}")
 
     # Step 1: Split dual-page spreads if enabled
-    pages = split_page(image) if do_split else [image]
-    results = []
+    if do_split:
+        try:
+            pages = split_page(image)
+        except Exception as e:
+            print(f"[Warning] Split failed for {input_path}: {e}", file=sys.stderr)
+            pages = [image]
+    else:
+        pages = [image]
 
+    results = []
     os.makedirs(output_dir, exist_ok=True)
 
     for sub_idx, page in enumerate(pages):
+        current = page
+
+        # Step 2: Auto orientation
+        if do_orient:
+            try:
+                current = fix_orientation(current)
+            except Exception as e:
+                print(f"[Warning] Orientation failed for page {idx}_{sub_idx}: {e}", file=sys.stderr)
+
+        # Step 3: Auto deskew slant
+        if do_deskew:
+            try:
+                current = deskew(current)
+            except Exception as e:
+                print(f"[Warning] Deskew failed for page {idx}_{sub_idx}: {e}", file=sys.stderr)
+
+        # Step 4: Shadow & crease removal
+        if do_shadows:
+            try:
+                current = remove_shadows(current)
+            except Exception as e:
+                print(f"[Warning] Shadow removal failed for page {idx}_{sub_idx}: {e}", file=sys.stderr)
+
+        # Step 5: Auto crop & uniform margins
+        if do_margins:
+            try:
+                current = crop_content_and_margins(current, margin=50)
+            except Exception as e:
+                print(f"[Warning] Margin crop failed for page {idx}_{sub_idx}: {e}", file=sys.stderr)
+
+        # Step 6: Denoise & despeckle
+        if do_denoise:
+            try:
+                current = despeckle_image(current)
+            except Exception as e:
+                print(f"[Warning] Denoise failed for page {idx}_{sub_idx}: {e}", file=sys.stderr)
+
+        # Step 7: Filter enhancement mode (Color / Grayscale / B&W / Original)
         try:
-            # Step 2: Auto orientation
-            if do_orient:
-                page = fix_orientation(page)
+            current = enhance_output(current, mode=filter_mode)
+        except Exception as e:
+            print(f"[Warning] Enhancement mode failed for page {idx}_{sub_idx}: {e}", file=sys.stderr)
 
-            # Step 3: Auto deskew slant
-            if do_deskew:
-                page = deskew(page)
-
-            # Step 4: Shadow & crease removal
-            if do_shadows:
-                page = remove_shadows(page)
-
-            # Step 5: Auto crop & uniform margins
-            if do_margins:
-                page = crop_content_and_margins(page, margin=50)
-
-            # Step 6: Denoise & despeckle
-            if do_denoise:
-                page = despeckle_image(page)
-
-            # Step 7: Filter enhancement mode
-            final = enhance_output(page, mode=filter_mode)
-
-            out_name = os.path.join(output_dir, f"page_{idx}_{sub_idx}_cv.png")
-            cv2.imwrite(out_name, final)
-            results.append(out_name)
-        except Exception as err:
-            # Fallback direct save if processing fails on sub-page
-            out_name = os.path.join(output_dir, f"page_{idx}_{sub_idx}_cv.png")
-            cv2.imwrite(out_name, page)
-            results.append(out_name)
+        out_name = os.path.join(output_dir, f"page_{idx}_{sub_idx}_cv.png")
+        if not imwrite_unicode(out_name, current):
+            cv2.imwrite(out_name, current)
+        results.append(out_name)
 
     return results
 

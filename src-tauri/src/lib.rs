@@ -49,11 +49,26 @@ fn get_enriched_path() -> String {
         let program_files = std::env::var("ProgramFiles").unwrap_or_default();
         let program_files_x86 = std::env::var("ProgramFiles(x86)").unwrap_or_default();
 
+        let py_base = format!(r"{}\Programs\Python", local_app_data);
+        if let Ok(entries) = std::fs::read_dir(&py_base) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    extra_paths.push(p.to_string_lossy().to_string());
+                    extra_paths.push(p.join("Scripts").to_string_lossy().to_string());
+                }
+            }
+        }
+
         let win_candidates = [
+            format!(r"{}\Programs\Python\Python315", local_app_data),
+            format!(r"{}\Programs\Python\Python314", local_app_data),
             format!(r"{}\Programs\Python\Python313", local_app_data),
             format!(r"{}\Programs\Python\Python312", local_app_data),
             format!(r"{}\Programs\Python\Python311", local_app_data),
             format!(r"{}\Programs\Python\Python310", local_app_data),
+            format!(r"{}\Programs\Python\Python315\Scripts", local_app_data),
+            format!(r"{}\Programs\Python\Python314\Scripts", local_app_data),
             format!(r"{}\Programs\Python\Python313\Scripts", local_app_data),
             format!(r"{}\Programs\Python\Python312\Scripts", local_app_data),
             format!(r"{}\Programs\Python\Python311\Scripts", local_app_data),
@@ -64,6 +79,8 @@ fn get_enriched_path() -> String {
             format!(r"{}\miniconda3\Scripts", user_profile),
             format!(r"{}\Tesseract-OCR", program_files),
             format!(r"{}\Tesseract-OCR", program_files_x86),
+            r"C:\Python315".to_string(),
+            r"C:\Python314".to_string(),
             r"C:\Python313".to_string(),
             r"C:\Python312".to_string(),
             r"C:\Python311".to_string(),
@@ -117,16 +134,30 @@ fn resolve_python_binary(env_path: &str) -> String {
         let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_default();
         let user_profile = std::env::var("USERPROFILE").unwrap_or_default();
 
+        let py_base = format!(r"{}\Programs\Python", local_app_data);
+        if let Ok(entries) = std::fs::read_dir(&py_base) {
+            for entry in entries.flatten() {
+                let py_exe = entry.path().join("python.exe");
+                if py_exe.exists() {
+                    explicit_candidates.push(py_exe.to_string_lossy().to_string());
+                }
+            }
+        }
+
         explicit_candidates.extend([
-            "py".to_string(),
             "python".to_string(),
+            "py".to_string(),
             "python3".to_string(),
+            format!(r"{}\Programs\Python\Python315\python.exe", local_app_data),
+            format!(r"{}\Programs\Python\Python314\python.exe", local_app_data),
             format!(r"{}\Programs\Python\Python313\python.exe", local_app_data),
             format!(r"{}\Programs\Python\Python312\python.exe", local_app_data),
             format!(r"{}\Programs\Python\Python311\python.exe", local_app_data),
             format!(r"{}\Programs\Python\Python310\python.exe", local_app_data),
             format!(r"{}\anaconda3\python.exe", user_profile),
             format!(r"{}\miniconda3\python.exe", user_profile),
+            r"C:\Python315\python.exe".to_string(),
+            r"C:\Python314\python.exe".to_string(),
             r"C:\Python313\python.exe".to_string(),
             r"C:\Python312\python.exe".to_string(),
             r"C:\Python311\python.exe".to_string(),
@@ -235,10 +266,25 @@ async fn preprocess_images(
     let env_path = get_enriched_path();
     let python_bin = resolve_python_binary(&env_path);
 
-    // Create temp directory next to original images
+    // Create temp directory next to original images, with safe fallback to system temp dir
     let first_img = Path::new(&image_paths[0]);
-    let out_dir = first_img.parent().unwrap().join("scansmith_temp");
-    std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+    let out_dir = match first_img.parent() {
+        Some(p) if !p.as_os_str().is_empty() => {
+            let candidate = p.join("scansmith_temp");
+            if std::fs::create_dir_all(&candidate).is_ok() {
+                candidate
+            } else {
+                let fallback = std::env::temp_dir().join("scansmith_temp");
+                std::fs::create_dir_all(&fallback).map_err(|e| e.to_string())?;
+                fallback
+            }
+        }
+        _ => {
+            let fallback = std::env::temp_dir().join("scansmith_temp");
+            std::fs::create_dir_all(&fallback).map_err(|e| e.to_string())?;
+            fallback
+        }
+    };
 
     let split = if settings["split"].as_bool().unwrap_or(true) { "1" } else { "0" };
     let orient = if settings["orient"].as_bool().unwrap_or(true) { "1" } else { "0" };

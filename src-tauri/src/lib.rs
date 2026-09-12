@@ -26,12 +26,20 @@ struct Progress {
     message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TokenUsage {
+    pub prompt_tokens: u64,
+    pub candidate_tokens: u64,
+    pub total_tokens: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocxGenerationResult {
     pub user_path: String,
     pub history_path: String,
     pub filename: String,
     pub title: Option<String>,
+    pub token_usage: TokenUsage,
 }
 
 fn get_app_temp_dir() -> PathBuf {
@@ -839,8 +847,20 @@ async fn generate_docx(
     let mut all_blocks: Vec<serde_json::Value> = Vec::new();
     let mut doc_title: Option<String> = None;
     let mut suggested_filename: Option<String> = None;
+    let mut total_prompt_tokens: u64 = 0;
+    let mut total_candidate_tokens: u64 = 0;
+    let mut total_tokens: u64 = 0;
 
     for (_, json) in results {
+        if let Some(usage) = json.get("usageMetadata") {
+            let prompt = usage.get("promptTokenCount").and_then(|v| v.as_u64()).unwrap_or(0);
+            let candidates = usage.get("candidatesTokenCount").and_then(|v| v.as_u64()).unwrap_or(0);
+            let total = usage.get("totalTokenCount").and_then(|v| v.as_u64()).unwrap_or(prompt + candidates);
+            total_prompt_tokens += prompt;
+            total_candidate_tokens += candidates;
+            total_tokens += total;
+        }
+
         let raw_text = json["candidates"][0]["content"]["parts"][0]["text"].as_str().unwrap_or("{}");
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw_text) {
             if doc_title.is_none() {
@@ -985,6 +1005,11 @@ async fn generate_docx(
         history_path: history_docx_path.to_string_lossy().to_string(),
         filename: final_base_filename,
         title: doc_title,
+        token_usage: TokenUsage {
+            prompt_tokens: total_prompt_tokens,
+            candidate_tokens: total_candidate_tokens,
+            total_tokens,
+        },
     })
 }
 

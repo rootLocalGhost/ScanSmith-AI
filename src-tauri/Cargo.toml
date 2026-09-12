@@ -1,6 +1,6 @@
 [package]
 name = "scansmith-ai"
-version = "1.0.5"
+version = "1.5.0"
 description = "ScanSmith AI Studio - Document Scan Digitizer & DOCX Converter"
 edition = "2021"
 

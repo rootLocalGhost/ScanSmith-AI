@@ -32,10 +32,20 @@ interface ModelInfo {
   badge: string;
 }
 
+interface DocxGenerationResult {
+  user_path: string;
+  history_path: string;
+  filename: string;
+  title?: string;
+}
+
 interface HistoryItem {
   id: string;
   filename: string;
-  path: string;
+  userPath?: string;
+  historyPath?: string;
+  path?: string;
+  title?: string;
   timestamp: string;
   pageCount: number;
 }
@@ -138,6 +148,13 @@ export default function App() {
   const [images, setImages] = createSignal<string[]>([]);
   const [cleanedImages, setCleanedImages] = createSignal<string[]>([]);
   const [outputFilename, setOutputFilename] = createSignal("Compiled_Document");
+  const [aiAutoName, setAiAutoName] = createSignal(
+    localStorage.getItem("SCANSMITH_AI_AUTO_NAME") !== "false"
+  );
+  const toggleAiAutoName = (val: boolean) => {
+    setAiAutoName(val);
+    localStorage.setItem("SCANSMITH_AI_AUTO_NAME", String(val));
+  };
   const [viewMode, setViewMode] = createSignal<"raw" | "cleaned">("raw");
 
   // Processing & Results State
@@ -229,7 +246,17 @@ export default function App() {
       if (isModelDropdownOpen()) setIsModelDropdownOpen(false);
     };
     window.addEventListener("click", handleWindowClick);
-    return () => window.removeEventListener("click", handleWindowClick);
+
+    // Clean up temporary session files on unload
+    const handleBeforeUnload = () => {
+      invoke("cleanup_temp_files").catch(() => {});
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+
+    return () => {
+      window.removeEventListener("click", handleWindowClick);
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
   });
 
   const handlePaths = (paths: string[]) => {
@@ -473,7 +500,8 @@ export default function App() {
     setPageOverrides({});
     setRotationOffsets({});
     setConfiguringPage(null);
-    addToast("Cleared all scans", "info");
+    invoke("cleanup_temp_files").catch(() => {});
+    addToast("Cleared all scans and temporary cache", "info");
   };
 
   // Run OpenCV Processing
@@ -566,24 +594,31 @@ export default function App() {
     setProgressMsg(`Connecting to ${selectedModelInfo()?.name || model()}...`);
 
     try {
-      const res = await invoke<string>("generate_docx", {
+      const res = await invoke<DocxGenerationResult>("generate_docx", {
         apiKey: apiKey().trim(),
         cleanedPaths: pagesToProcess,
         originalImgPath: images()[0],
         docType: selectedPreset(),
         customPrompt: instructions(),
         model: model(),
-        outputFilename: outputFilename().trim() || "Compiled_Document"
+        outputFilename: outputFilename().trim() || "Compiled_Document",
+        aiAutoName: aiAutoName()
       });
 
-      setOutputResult(res);
-      addToast("Document created successfully!", "success");
+      setOutputResult(res.user_path);
+      if (res.filename) {
+        setOutputFilename(res.filename);
+      }
+      addToast(`Created "${res.filename}.docx" in user folder & history archive!`, "success");
 
-      // Record in History
+      // Record in History with dual paths & document title
       const newHistoryItem: HistoryItem = {
         id: Date.now().toString(),
-        filename: outputFilename(),
-        path: res,
+        filename: res.filename,
+        userPath: res.user_path,
+        historyPath: res.history_path,
+        path: res.user_path,
+        title: res.title,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         pageCount: pagesToProcess.length
       };
@@ -607,6 +642,63 @@ export default function App() {
       addToast("Opening document in editor...", "info");
     } catch (e) {
       addToast(`Failed to open file: ${e}`, "error", `${e}`);
+    }
+  };
+
+  const openHistoryDoc = async (item: HistoryItem, forceArchive: boolean = false) => {
+    const userPath = item.userPath || item.path;
+    const historyPath = item.historyPath;
+
+    if (forceArchive && historyPath) {
+      try {
+        await invoke("open_document", { path: historyPath });
+        addToast("Opening guaranteed archive copy from app history...", "info");
+        return;
+      } catch (e) {
+        addToast(`Failed to open archive copy: ${e}`, "error", `${e}`);
+        return;
+      }
+    }
+
+    // Try user copy first
+    if (userPath) {
+      try {
+        const exists = await invoke<boolean>("check_path_exists", { path: userPath });
+        if (exists) {
+          await invoke("open_document", { path: userPath });
+          addToast("Opening user document...", "info");
+          return;
+        }
+      } catch {}
+    }
+
+    // Fallback seamlessly to permanent app history archive copy
+    if (historyPath) {
+      try {
+        const exists = await invoke<boolean>("check_path_exists", { path: historyPath });
+        if (exists) {
+          await invoke("open_document", { path: historyPath });
+          addToast("User copy moved or missing — opened guaranteed archive copy", "info");
+          return;
+        }
+      } catch {}
+    }
+
+    if (userPath) {
+      try {
+        await invoke("open_document", { path: userPath });
+      } catch (e) {
+        addToast(`File not found: ${userPath}`, "error", `${e}`);
+      }
+    }
+  };
+
+  const handleOpenHistoryFolder = async () => {
+    try {
+      await invoke("open_history_folder");
+      addToast("Opened App History directory", "info");
+    } catch (e) {
+      addToast(`Failed to open history directory: ${e}`, "error", `${e}`);
     }
   };
 
@@ -1076,16 +1168,50 @@ export default function App() {
             <Show when={activeSidebarTab() === 'output'}>
               <div class="setting-section">
                 <div class="setting-title-row">
-                  <label class="setting-label">Output Filename</label>
-                  <span class="setting-hint">Saved in source folder</span>
+                  <label class="setting-label">Document Filename</label>
+                  <button
+                    class={`pill-toggle-btn ${aiAutoName() ? 'active' : ''}`}
+                    onClick={() => toggleAiAutoName(!aiAutoName())}
+                    title="Toggle automatic AI semantic naming based on document content"
+                  >
+                    <span>✨</span>
+                    <span>AI Smart Name</span>
+                  </button>
                 </div>
                 <input
                   class="modern-input"
                   type="text"
                   value={outputFilename()}
                   onInput={(e) => setOutputFilename(e.currentTarget.value)}
-                  placeholder="Compiled_Document"
+                  placeholder={aiAutoName() ? "Auto (AI will generate a name)" : "Compiled_Document"}
                 />
+                <div style={{ "margin-top": "6px", "font-size": "0.73rem", color: "var(--ink-muted)", "line-height": "1.4" }}>
+                  {aiAutoName()
+                    ? "✨ AI will name your file dynamically from the document title & subject."
+                    : "Using custom name. Automatically increments (1, 2...) to prevent overwriting."}
+                </div>
+              </div>
+
+              <div class="setting-section">
+                <div class="setting-title-row">
+                  <label class="setting-label">Dual Storage Locations</label>
+                </div>
+                <div class="dual-storage-info-box">
+                  <div class="storage-row">
+                    <span class="storage-icon">📂</span>
+                    <div class="storage-details">
+                      <strong>User Directory:</strong>
+                      <span>Saved next to your scan photos</span>
+                    </div>
+                  </div>
+                  <div class="storage-row">
+                    <span class="storage-icon">🏛️</span>
+                    <div class="storage-details">
+                      <strong>App History Archive:</strong>
+                      <span>Guaranteed permanent copy in local app storage</span>
+                    </div>
+                  </div>
+                </div>
               </div>
 
               <div class="setting-section">
@@ -1871,12 +1997,23 @@ export default function App() {
                 <span>📚</span>
                 Document History
               </div>
-              <button class="page-mini-btn" onClick={() => setShowHistoryDrawer(false)}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-              </button>
+              <div style={{ display: "flex", "align-items": "center", gap: "8px" }}>
+                <button
+                  class="btn btn-secondary"
+                  style={{ padding: "4px 10px", "font-size": "0.75rem", display: "flex", "align-items": "center", gap: "5px" }}
+                  onClick={handleOpenHistoryFolder}
+                  title="Open the app's permanent history archive folder in file manager"
+                >
+                  <span>📁</span>
+                  <span>Archive Folder</span>
+                </button>
+                <button class="page-mini-btn" onClick={() => setShowHistoryDrawer(false)}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
             </div>
             <div class="drawer-body">
               <Show when={history().length === 0}>
@@ -1891,14 +2028,48 @@ export default function App() {
                       <div class="history-item-name">{item.filename}.docx</div>
                       <div class="history-item-date">{item.timestamp} • {item.pageCount} pages</div>
                     </div>
-                    <div class="history-item-path">{item.path}</div>
-                    <div style={{ display: "flex", gap: "8px", "margin-top": "6px" }}>
-                      <button class="btn btn-secondary" style={{ padding: "4px 10px", "font-size": "0.75rem" }} onClick={() => copyToClipboard(item.path)}>
+                    <Show when={item.title}>
+                      <div style={{ "font-size": "0.75rem", color: "var(--ink)", "font-weight": 600, "margin-bottom": "4px" }}>
+                        📝 {item.title}
+                      </div>
+                    </Show>
+                    <div class="history-item-paths">
+                      <div class="history-path-badge" title={item.userPath || item.path}>
+                        <span class="badge-tag user">User</span>
+                        <span>{item.userPath || item.path}</span>
+                      </div>
+                      <Show when={item.historyPath}>
+                        <div class="history-path-badge" title={item.historyPath}>
+                          <span class="badge-tag archive">Archive</span>
+                          <span>{item.historyPath}</span>
+                        </div>
+                      </Show>
+                    </div>
+                    <div style={{ display: "flex", gap: "8px", "margin-top": "6px", "flex-wrap": "wrap" }}>
+                      <button
+                        class="btn btn-secondary"
+                        style={{ padding: "4px 10px", "font-size": "0.75rem" }}
+                        onClick={() => copyToClipboard(item.userPath || item.path || "")}
+                      >
                         Copy Path
                       </button>
-                      <button class="btn btn-primary" style={{ padding: "4px 10px", "font-size": "0.75rem" }} onClick={() => openGeneratedDoc(item.path)}>
+                      <button
+                        class="btn btn-primary"
+                        style={{ padding: "4px 10px", "font-size": "0.75rem" }}
+                        onClick={() => openHistoryDoc(item, false)}
+                      >
                         Open
                       </button>
+                      <Show when={item.historyPath}>
+                        <button
+                          class="btn btn-secondary"
+                          style={{ padding: "4px 10px", "font-size": "0.75rem", background: "var(--bg-surface-elevated)" }}
+                          onClick={() => openHistoryDoc(item, true)}
+                          title="Open guaranteed permanent archive copy"
+                        >
+                          🏛️ Archive
+                        </button>
+                      </Show>
                     </div>
                   </div>
                 )}

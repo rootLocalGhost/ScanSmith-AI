@@ -32,11 +32,18 @@ interface ModelInfo {
   badge: string;
 }
 
+interface TokenUsage {
+  prompt_tokens: number;
+  candidate_tokens: number;
+  total_tokens: number;
+}
+
 interface DocxGenerationResult {
   user_path: string;
   history_path: string;
   filename: string;
   title?: string;
+  token_usage?: TokenUsage;
 }
 
 interface HistoryItem {
@@ -56,6 +63,78 @@ interface ToastInfo {
   type: "info" | "success" | "error";
   rawError?: string;
 }
+
+interface ModelLimits {
+  rpm: number;
+  rpd: number;
+  tpm: number;
+  tier: "Free" | "Paid";
+}
+
+const MODEL_LIMITS: Record<string, ModelLimits> = {
+  "gemini-3.5-flash": { rpm: 15, rpd: 1500, tpm: 1000000, tier: "Free" },
+  "gemini-3.5-flash-lite": { rpm: 30, rpd: 1500, tpm: 1000000, tier: "Free" },
+  "gemini-3.1-flash-lite": { rpm: 30, rpd: 1500, tpm: 1000000, tier: "Free" },
+  "gemini-3.6-flash": { rpm: 15, rpd: 1500, tpm: 1000000, tier: "Free" },
+  "gemini-3.7-flash": { rpm: 15, rpd: 1500, tpm: 1000000, tier: "Free" },
+  "gemini-3.1-pro-preview": { rpm: 2, rpd: 50, tpm: 32000, tier: "Paid" },
+  "gemini-pro-latest": { rpm: 2, rpd: 50, tpm: 32000, tier: "Paid" }
+};
+
+interface DailyUsageState {
+  date: string;
+  requests: number;
+  promptTokens: number;
+  candidateTokens: number;
+  totalTokens: number;
+}
+
+const getPacificDateStr = (): string => {
+  try {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Los_Angeles",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).format(new Date());
+  } catch {
+    return new Date().toISOString().split("T")[0];
+  }
+};
+
+const getHoursUntilPacificMidnight = (): number => {
+  try {
+    const now = new Date();
+    const pacificNowStr = now.toLocaleString("en-US", { timeZone: "America/Los_Angeles" });
+    const pacificNow = new Date(pacificNowStr);
+    const pacificMidnight = new Date(pacificNow);
+    pacificMidnight.setHours(24, 0, 0, 0);
+    const diffMs = pacificMidnight.getTime() - pacificNow.getTime();
+    return Math.max(1, Math.round(diffMs / (1000 * 60 * 60)));
+  } catch {
+    return 12;
+  }
+};
+
+const loadDailyUsage = (): DailyUsageState => {
+  const today = getPacificDateStr();
+  try {
+    const saved = localStorage.getItem("SCANSMITH_API_USAGE");
+    if (saved) {
+      const parsed: DailyUsageState = JSON.parse(saved);
+      if (parsed && parsed.date === today) {
+        return parsed;
+      }
+    }
+  } catch {}
+  return {
+    date: today,
+    requests: 0,
+    promptTokens: 0,
+    candidateTokens: 0,
+    totalTokens: 0
+  };
+};
 
 const PRESETS: PresetInfo[] = [
   {
@@ -112,6 +191,20 @@ export default function App() {
   const initialModel = MODELS.some(m => m.id === savedModel && !m.badge.includes("Paid")) ? savedModel : MODELS[0].id;
   const [model, setModel] = createSignal(initialModel);
   const [isModelDropdownOpen, setIsModelDropdownOpen] = createSignal(false);
+
+  // Live API Quota & Usage Monitor State
+  const [apiUsage, setApiUsage] = createSignal<DailyUsageState>(loadDailyUsage());
+  const activeLimits = () => {
+    return MODEL_LIMITS[model()] || { rpm: 15, rpd: 1500, tpm: 1000000, tier: "Free" };
+  };
+
+  const openAIStudioDashboard = async () => {
+    try {
+      await invoke("open_document", { path: "https://aistudio.google.com/app/plan_information" });
+    } catch {
+      window.open("https://aistudio.google.com/", "_blank");
+    }
+  };
 
   const [selectedPreset, setSelectedPreset] = createSignal(localStorage.getItem("SCANSMITH_PRESET") || localStorage.getItem("AURA_PRESET") || PRESETS[0].name);
   const [instructions, setInstructions] = createSignal(
@@ -626,6 +719,29 @@ export default function App() {
       const updated = [newHistoryItem, ...currentList.slice(0, 19)];
       setHistory(updated);
       localStorage.setItem("SCANSMITH_HISTORY", JSON.stringify(updated));
+
+      // Accumulate daily API quota and token usage
+      const today = getPacificDateStr();
+      const currentUsage = apiUsage();
+      const isSameDay = currentUsage.date === today;
+      const baseReqs = isSameDay ? currentUsage.requests : 0;
+      const basePrompt = isSameDay ? currentUsage.promptTokens : 0;
+      const baseCand = isSameDay ? currentUsage.candidateTokens : 0;
+      const baseTotal = isSameDay ? currentUsage.totalTokens : 0;
+
+      const pTokens = Number(res.token_usage?.prompt_tokens || 0);
+      const cTokens = Number(res.token_usage?.candidate_tokens || 0);
+      const tTokens = Number(res.token_usage?.total_tokens || (pTokens + cTokens));
+
+      const updatedUsage: DailyUsageState = {
+        date: today,
+        requests: baseReqs + pagesToProcess.length,
+        promptTokens: basePrompt + pTokens,
+        candidateTokens: baseCand + cTokens,
+        totalTokens: baseTotal + tTokens
+      };
+      setApiUsage(updatedUsage);
+      localStorage.setItem("SCANSMITH_API_USAGE", JSON.stringify(updatedUsage));
     } catch (err: any) {
       const errMsg = `${err}`;
       setProgressMsg(`AI Error: ${errMsg}`);
@@ -1227,6 +1343,79 @@ export default function App() {
                 </div>
               </div>
             </Show>
+          </div>
+
+          {/* Sidebar API Quota & Usage Monitor */}
+          <div class="sidebar-quota-container">
+            <div class="quota-header-row">
+              <div class="quota-title">
+                <span>⚡</span>
+                API Quota & Usage
+              </div>
+              <span class={`quota-tier-badge ${activeLimits().tier === 'Paid' ? 'paid' : ''}`}>
+                {activeLimits().tier} Tier
+              </span>
+            </div>
+
+            <div class="quota-model-specs">
+              <span class="quota-model-name" title={selectedModelInfo()?.name || model()}>
+                {selectedModelInfo()?.name || model()}
+              </span>
+              <span>{activeLimits().rpd.toLocaleString()} RPD • {activeLimits().rpm} RPM</span>
+            </div>
+
+            <div class="quota-progress-box">
+              <div class="quota-progress-labels">
+                <span>{apiUsage().requests} / {activeLimits().rpd.toLocaleString()} reqs today</span>
+                <span class="quota-progress-remaining">
+                  {Math.max(0, activeLimits().rpd - apiUsage().requests).toLocaleString()} left
+                </span>
+              </div>
+              <div class="quota-progress-track">
+                {(() => {
+                  const pct = Math.min(100, (apiUsage().requests / Math.max(1, activeLimits().rpd)) * 100);
+                  const colorClass = pct > 90 ? 'danger' : pct > 75 ? 'warning' : 'normal';
+                  return (
+                    <div
+                      class={`quota-progress-fill ${colorClass}`}
+                      style={{ width: `${Math.max(pct, apiUsage().requests > 0 ? 3 : 0)}%` }}
+                    ></div>
+                  );
+                })()}
+              </div>
+            </div>
+
+            <div class="quota-metrics-row">
+              <div class="quota-metric-col">
+                <span class="quota-metric-label">Tokens Today</span>
+                <span class="quota-metric-val">
+                  {apiUsage().totalTokens >= 1000000
+                    ? `${(apiUsage().totalTokens / 1000000).toFixed(2)}M`
+                    : apiUsage().totalTokens >= 1000
+                    ? `${(apiUsage().totalTokens / 1000).toFixed(1)}k`
+                    : apiUsage().totalTokens}
+                </span>
+              </div>
+              <div class="quota-metric-col">
+                <span class="quota-metric-label">Quota Used</span>
+                <span class="quota-metric-val">
+                  {((apiUsage().requests / Math.max(1, activeLimits().rpd)) * 100).toFixed(1)}%
+                </span>
+              </div>
+            </div>
+
+            <div class="quota-footer-row">
+              <span class="quota-reset-text" title="Google resets daily quotas at midnight Pacific Time">
+                🕒 Resets ~{getHoursUntilPacificMidnight()}h (Midnight PT)
+              </span>
+              <button
+                class="quota-link-btn"
+                onClick={openAIStudioDashboard}
+                title="View full quota, rate limits, and billing in Google AI Studio"
+              >
+                AI Studio ↗
+              </button>
+            </div>
           </div>
         </aside>
 

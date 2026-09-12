@@ -4,10 +4,10 @@ use image::ImageEncoder;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 const EMBEDDED_CV_SCRIPT: &str = include_str!("../scansmith_cv.py");
 
@@ -26,8 +26,123 @@ struct Progress {
     message: String,
 }
 
-fn ensure_cv_script_available() -> Result<std::path::PathBuf, String> {
-    let temp_script_path = std::env::temp_dir().join("scansmith_ai_cv_engine.py");
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocxGenerationResult {
+    pub user_path: String,
+    pub history_path: String,
+    pub filename: String,
+    pub title: Option<String>,
+}
+
+fn get_app_temp_dir() -> PathBuf {
+    std::env::temp_dir().join("scansmith_ai").join("temp")
+}
+
+pub fn cleanup_temp_dir() {
+    let app_temp = std::env::temp_dir().join("scansmith_ai");
+    if app_temp.exists() {
+        let _ = std::fs::remove_dir_all(&app_temp);
+    }
+    let legacy_temp = std::env::temp_dir().join("scansmith_temp");
+    if legacy_temp.exists() {
+        let _ = std::fs::remove_dir_all(&legacy_temp);
+    }
+    let legacy_script = std::env::temp_dir().join("scansmith_ai_cv_engine.py");
+    if legacy_script.exists() {
+        let _ = std::fs::remove_file(&legacy_script);
+    }
+}
+
+fn get_history_archive_dir(app_handle: &tauri::AppHandle) -> PathBuf {
+    let base = if let Ok(data_dir) = app_handle.path().app_data_dir() {
+        data_dir
+    } else {
+        #[cfg(target_os = "windows")]
+        {
+            let app_data = std::env::var("APPDATA").unwrap_or_default();
+            if !app_data.is_empty() {
+                PathBuf::from(app_data).join("scansmith-ai")
+            } else {
+                std::env::temp_dir().join("scansmith_ai_data")
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let home = std::env::var("HOME").unwrap_or_default();
+            if !home.is_empty() {
+                PathBuf::from(home).join(".local").join("share").join("scansmith-ai")
+            } else {
+                std::env::temp_dir().join("scansmith_ai_data")
+            }
+        }
+    };
+    base.join("history")
+}
+
+fn sanitize_filename(name: &str) -> String {
+    let trimmed_input = name.trim();
+    let without_docx = if trimmed_input.to_lowercase().ends_with(".docx") {
+        &trimmed_input[..trimmed_input.len() - 5]
+    } else {
+        trimmed_input
+    };
+    let forbidden = ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0', '\n', '\r', '\t'];
+    let clean: String = without_docx
+        .chars()
+        .map(|c| if forbidden.contains(&c) { '_' } else { c })
+        .collect();
+
+    let trimmed = clean.trim().trim_matches('.').trim();
+    let mut result = String::new();
+    let mut last_char = ' ';
+    for c in trimmed.chars() {
+        if (c == '_' || c == ' ') && (last_char == '_' || last_char == ' ') {
+            continue;
+        }
+        result.push(c);
+        last_char = c;
+    }
+
+    let result = result.replace(' ', "_");
+    if result.is_empty() {
+        "Document".to_string()
+    } else if result.len() > 80 {
+        result.chars().take(80).collect()
+    } else {
+        result
+    }
+}
+
+fn resolve_unique_path(dir: &Path, base_name: &str, ext: &str) -> (PathBuf, String) {
+    let clean_ext = ext.trim_start_matches('.');
+    let base = if base_name.trim().is_empty() {
+        "Document"
+    } else {
+        base_name.trim()
+    };
+    let initial_name = format!("{}.{}", base, clean_ext);
+    let mut candidate_path = dir.join(&initial_name);
+    if !candidate_path.exists() {
+        return (candidate_path, initial_name);
+    }
+
+    let mut counter = 1;
+    loop {
+        let candidate_name = format!("{} ({}).{}", base, counter, clean_ext);
+        candidate_path = dir.join(&candidate_name);
+        if !candidate_path.exists() {
+            return (candidate_path, candidate_name);
+        }
+        counter += 1;
+    }
+}
+
+fn ensure_cv_script_available() -> Result<PathBuf, String> {
+    let app_temp = get_app_temp_dir();
+    if !app_temp.exists() {
+        let _ = std::fs::create_dir_all(&app_temp);
+    }
+    let temp_script_path = app_temp.join("scansmith_ai_cv_engine.py");
     std::fs::write(&temp_script_path, EMBEDDED_CV_SCRIPT).map_err(|e| {
         format!(
             "Failed to write embedded OpenCV script to {:?}: {}",
@@ -267,25 +382,10 @@ async fn preprocess_images(
     let env_path = get_enriched_path();
     let python_bin = resolve_python_binary(&env_path);
 
-    // Create temp directory next to original images, with safe fallback to system temp dir
-    let first_img = Path::new(&image_paths[0]);
-    let out_dir = match first_img.parent() {
-        Some(p) if !p.as_os_str().is_empty() => {
-            let candidate = p.join("scansmith_temp");
-            if std::fs::create_dir_all(&candidate).is_ok() {
-                candidate
-            } else {
-                let fallback = std::env::temp_dir().join("scansmith_temp");
-                std::fs::create_dir_all(&fallback).map_err(|e| e.to_string())?;
-                fallback
-            }
-        }
-        _ => {
-            let fallback = std::env::temp_dir().join("scansmith_temp");
-            std::fs::create_dir_all(&fallback).map_err(|e| e.to_string())?;
-            fallback
-        }
-    };
+    // Use isolated system temp directory under scansmith_ai
+    let out_dir = get_app_temp_dir();
+    std::fs::create_dir_all(&out_dir)
+        .map_err(|e| format!("Failed to create temporary directory {:?}: {}", out_dir, e))?;
 
     let split = if settings["split"].as_bool().unwrap_or(true) { "1" } else { "0" };
     let orient = if settings["orient"].as_bool().unwrap_or(true) { "1" } else { "0" };
@@ -559,7 +659,8 @@ async fn generate_docx(
     custom_prompt: String,
     model: String,
     output_filename: String,
-) -> Result<String, String> {
+    ai_auto_name: Option<bool>,
+) -> Result<DocxGenerationResult, String> {
     if cleaned_paths.is_empty() {
         return Err("No pages provided for document generation".into());
     }
@@ -574,14 +675,6 @@ async fn generate_docx(
         },
     );
 
-    let original_dir = Path::new(&original_img_path).parent().unwrap().to_str().unwrap();
-    let final_filename = if output_filename.to_lowercase().ends_with(".docx") {
-        output_filename
-    } else {
-        format!("{}.docx", output_filename)
-    };
-    let output_docx_path = format!("{}/{}", original_dir, final_filename);
-
     let config = serde_json::json!({
         "response_mime_type": "application/json", 
         "temperature": 0.1,
@@ -589,6 +682,7 @@ async fn generate_docx(
             "type": "OBJECT", 
             "properties": { 
                 "title": { "type": "STRING" }, 
+                "suggested_filename": { "type": "STRING" },
                 "blocks": { 
                     "type": "ARRAY", 
                     "items": { 
@@ -640,7 +734,7 @@ async fn generate_docx(
 
             let parts = vec![
                 serde_json::json!({
-                    "text": format!("Extract all text, math equations, and tables from page {} as structured JSON. Preserve formatting hierarchy. Blocks: 'h1','h2','paragraph','bullet','numbered'. Prompt: {}", page_num, prompt_clone)
+                    "text": format!("Extract all text, math equations, and tables from page {} as structured JSON. Preserve formatting hierarchy. Blocks: 'h1','h2','paragraph','bullet','numbered'. In 'suggested_filename', suggest a concise, descriptive filename slug (e.g. 'Physics_Exam_2024' or 'Invoice_Acme_Oct') using only letters, numbers, and underscores. Prompt: {}", page_num, prompt_clone)
                 }),
                 serde_json::json!({
                     "inline_data": {
@@ -744,6 +838,7 @@ async fn generate_docx(
 
     let mut all_blocks: Vec<serde_json::Value> = Vec::new();
     let mut doc_title: Option<String> = None;
+    let mut suggested_filename: Option<String> = None;
 
     for (_, json) in results {
         let raw_text = json["candidates"][0]["content"]["parts"][0]["text"].as_str().unwrap_or("{}");
@@ -752,6 +847,14 @@ async fn generate_docx(
                 if let Some(title_val) = parsed.get("title").and_then(|t| t.as_str()) {
                     if !title_val.trim().is_empty() {
                         doc_title = Some(title_val.to_string());
+                    }
+                }
+            }
+            if suggested_filename.is_none() {
+                if let Some(fn_val) = parsed.get("suggested_filename").and_then(|f| f.as_str()) {
+                    let cleaned = sanitize_filename(fn_val);
+                    if !cleaned.is_empty() && !cleaned.eq_ignore_ascii_case("document") {
+                        suggested_filename = Some(cleaned);
                     }
                 }
             }
@@ -777,9 +880,9 @@ async fn generate_docx(
             .page_margin(PageMargin::new().top(720).bottom(720).left(720).right(720));
     }
 
-    if let Some(title) = doc_title {
+    if let Some(ref title) = doc_title {
         docx = docx.add_paragraph(
-            Paragraph::new().add_run(Run::new().add_text(&title).bold().size(32))
+            Paragraph::new().add_run(Run::new().add_text(title).bold().size(32))
         );
     }
 
@@ -806,7 +909,68 @@ async fn generate_docx(
         }
     }
 
-    docx.build().pack(File::create(&output_docx_path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    // Determine target folders: User source folder & Internal App History folder
+    let original_dir = match Path::new(&original_img_path).parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::env::temp_dir(),
+    };
+
+    let history_dir = get_history_archive_dir(&window.app_handle());
+    if !history_dir.exists() {
+        let _ = std::fs::create_dir_all(&history_dir);
+    }
+
+    // Filename Selection: AI suggestion > sanitized title > user filename > fallback
+    let clean_user_name = sanitize_filename(&output_filename);
+    let is_default_user_name = clean_user_name.is_empty()
+        || clean_user_name.eq_ignore_ascii_case("compiled_document")
+        || clean_user_name.eq_ignore_ascii_case("document")
+        || clean_user_name.eq_ignore_ascii_case("scansmith_document");
+
+    let should_use_ai_name = ai_auto_name.unwrap_or(true) || is_default_user_name;
+
+    let chosen_base_name = if should_use_ai_name {
+        if let Some(ref s) = suggested_filename {
+            s.clone()
+        } else if let Some(ref t) = doc_title {
+            let clean_t = sanitize_filename(t);
+            if !clean_t.is_empty() && !clean_t.eq_ignore_ascii_case("document") {
+                clean_t
+            } else if !clean_user_name.is_empty() {
+                clean_user_name
+            } else {
+                "ScanSmith_Document".to_string()
+            }
+        } else if !clean_user_name.is_empty() {
+            clean_user_name
+        } else {
+            "ScanSmith_Document".to_string()
+        }
+    } else {
+        if !clean_user_name.is_empty() {
+            clean_user_name
+        } else {
+            "ScanSmith_Document".to_string()
+        }
+    };
+
+    // Collision-free unique paths for both destinations
+    let (user_docx_path, user_filename_with_ext) = resolve_unique_path(&original_dir, &chosen_base_name, "docx");
+    let (history_docx_path, _) = resolve_unique_path(&history_dir, &chosen_base_name, "docx");
+
+    let final_base_filename = user_filename_with_ext
+        .strip_suffix(".docx")
+        .unwrap_or(&user_filename_with_ext)
+        .to_string();
+
+    let user_file = File::create(&user_docx_path)
+        .map_err(|e| format!("Failed to create output file {:?}: {}", user_docx_path, e))?;
+    docx.build().pack(user_file).map_err(|e| format!("Failed to assemble DOCX: {}", e))?;
+
+    // Dual-save: Archive permanent copy to app history directory
+    if let Err(e) = std::fs::copy(&user_docx_path, &history_docx_path) {
+        eprintln!("Warning: Failed to create history archive copy at {:?}: {}", history_docx_path, e);
+    }
 
     let _ = window.emit(
         "process-progress",
@@ -816,7 +980,12 @@ async fn generate_docx(
         },
     );
 
-    Ok(output_docx_path)
+    Ok(DocxGenerationResult {
+        user_path: user_docx_path.to_string_lossy().to_string(),
+        history_path: history_docx_path.to_string_lossy().to_string(),
+        filename: final_base_filename,
+        title: doc_title,
+    })
 }
 
 #[tauri::command]
@@ -973,6 +1142,7 @@ fn app_window_toggle_maximize(window: tauri::Window) -> Result<bool, String> {
 
 #[tauri::command]
 fn app_window_close(window: tauri::Window) -> Result<(), String> {
+    cleanup_temp_dir();
     window.close().map_err(|e| e.to_string())
 }
 
@@ -981,11 +1151,43 @@ fn app_window_is_maximized(window: tauri::Window) -> Result<bool, String> {
     window.is_maximized().map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn cleanup_temp_files() -> Result<(), String> {
+    cleanup_temp_dir();
+    Ok(())
+}
+
+#[tauri::command]
+fn open_history_folder(app_handle: tauri::AppHandle) -> Result<String, String> {
+    let hist_dir = get_history_archive_dir(&app_handle);
+    if !hist_dir.exists() {
+        std::fs::create_dir_all(&hist_dir).map_err(|e| e.to_string())?;
+    }
+    let path_str = hist_dir.to_string_lossy().to_string();
+    open_document(path_str.clone())?;
+    Ok(path_str)
+}
+
+#[tauri::command]
+fn check_path_exists(path: String) -> bool {
+    std::path::Path::new(&path).exists()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .setup(|_app| {
+            // Clean up any stale temp files from prior runs/crashes
+            cleanup_temp_dir();
+            Ok(())
+        })
+        .on_window_event(|_window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                cleanup_temp_dir();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             preprocess_images,
             generate_docx,
@@ -993,6 +1195,9 @@ pub fn run() {
             rotate_page,
             export_processed_images,
             export_single_image,
+            cleanup_temp_files,
+            open_history_folder,
+            check_path_exists,
             app_window_minimize,
             app_window_toggle_maximize,
             app_window_close,
@@ -1000,4 +1205,43 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running app");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_filename() {
+        assert_eq!(sanitize_filename("Physics Exam: 2024?"), "Physics_Exam_2024_");
+        assert_eq!(sanitize_filename("  Invoice *Tech* <Corp> | 100.docx  "), "Invoice_Tech_Corp_100");
+        assert_eq!(sanitize_filename("...my...document..."), "my...document");
+        assert_eq!(sanitize_filename(""), "Document");
+    }
+
+    #[test]
+    fn test_resolve_unique_path() {
+        let temp_dir = std::env::temp_dir().join("scansmith_test_unique");
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        let (p1, n1) = resolve_unique_path(&temp_dir, "TestDoc", "docx");
+        assert_eq!(n1, "TestDoc.docx");
+        std::fs::write(&p1, "content").unwrap();
+
+        let (p2, n2) = resolve_unique_path(&temp_dir, "TestDoc", "docx");
+        assert_eq!(n2, "TestDoc (1).docx");
+        std::fs::write(&p2, "content").unwrap();
+
+        let (_p3, n3) = resolve_unique_path(&temp_dir, "TestDoc", "docx");
+        assert_eq!(n3, "TestDoc (2).docx");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_temp_dir_helpers() {
+        let temp = get_app_temp_dir();
+        assert!(temp.to_string_lossy().contains("scansmith_ai"));
+        assert!(temp.to_string_lossy().contains("temp"));
+    }
 }

@@ -200,7 +200,7 @@ export default function App() {
 
   const openAIStudioDashboard = async () => {
     try {
-      await invoke("open_document", { path: "https://aistudio.google.com/app/plan_information" });
+      await invoke("open_document", { path: "https://aistudio.google.com/app/usage" });
     } catch {
       window.open("https://aistudio.google.com/", "_blank");
     }

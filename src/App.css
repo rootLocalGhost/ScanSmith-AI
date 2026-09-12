@@ -2161,3 +2161,182 @@ input:checked+.slider:before {
   color: var(--ink);
 }
 
+/* ==========================================================================
+   Sidebar API Quota & Usage Monitor Styles
+   ========================================================================== */
+
+.sidebar-quota-container {
+  flex-shrink: 0;
+  background: var(--bg-surface-elevated);
+  border-top: var(--border-width) solid var(--border-color);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.quota-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.quota-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-heading);
+  font-size: 0.8rem;
+  font-weight: 800;
+  color: var(--ink);
+  letter-spacing: -0.01em;
+}
+
+.quota-tier-badge {
+  font-size: 0.65rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
+  border: 1.5px solid var(--border-color);
+  background: var(--neo-lime);
+  color: #18181b;
+  box-shadow: 1.5px 1.5px 0px var(--border-color);
+}
+
+.quota-tier-badge.paid {
+  background: var(--neo-purple-light);
+  color: var(--ink);
+}
+
+.quota-model-specs {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.72rem;
+  color: var(--ink-muted);
+}
+
+.quota-model-name {
+  font-weight: 700;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 170px;
+}
+
+.quota-progress-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.quota-progress-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.7rem;
+  font-family: var(--font-mono);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.quota-progress-remaining {
+  color: var(--ink-muted);
+  font-weight: 500;
+}
+
+.quota-progress-track {
+  width: 100%;
+  height: 7px;
+  background: var(--bg-surface);
+  border: 1.5px solid var(--border-color);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+
+.quota-progress-fill {
+  height: 100%;
+  transition: width 0.3s var(--anim-snappy);
+  border-radius: var(--radius-pill);
+}
+
+.quota-progress-fill.normal {
+  background: var(--neo-lime);
+}
+
+.quota-progress-fill.warning {
+  background: var(--neo-orange);
+}
+
+.quota-progress-fill.danger {
+  background: var(--neo-coral);
+}
+
+.quota-metrics-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  background: var(--bg-surface);
+  border: 1.5px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+}
+
+.quota-metric-col {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.quota-metric-label {
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  letter-spacing: 0.02em;
+}
+
+.quota-metric-val {
+  font-size: 0.78rem;
+  font-family: var(--font-mono);
+  font-weight: 800;
+  color: var(--ink);
+}
+
+.quota-footer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.68rem;
+  color: var(--ink-muted);
+}
+
+.quota-reset-text {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.quota-link-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: var(--ink);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: var(--radius-xs);
+  transition: all 0.12s;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.quota-link-btn:hover {
+  color: var(--neo-purple);
+}
+
+

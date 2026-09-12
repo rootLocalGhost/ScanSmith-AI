@@ -553,7 +553,6 @@ body {
   transform: translate(-1px, -1px);
   box-shadow: var(--shadow-hard-hover);
   border-color: var(--neo-purple);
-  background: #ffffff;
 }
 
 .modern-textarea {

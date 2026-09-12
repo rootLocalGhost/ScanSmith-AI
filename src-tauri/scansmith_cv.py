@@ -480,24 +480,103 @@ def remove_shadows(image):
 
 def despeckle_image(image):
     """
-    Fast edge-preserving document denoise and despeckle filter.
-    Smooths scanner grain and sensor noise in uniform paper areas
-    while strictly preserving crisp high-contrast text and ink edges.
-    Runs in tens of milliseconds instead of dozens of seconds.
+    CamScanner-grade edge-preserving denoise, bleed-through suppression,
+    and connected-component speckle purge engine.
+    - Suppresses reverse-side / back-page bleed-through text marks.
+    - Purges scanner glass dust, sensor grain, and stray toner specks.
+    - Preserves and solidifies front-page ink strokes, punctuation, and colored stamps.
+    - Neutralizes paper chroma/yellowing while maintaining vibrant ink saturation.
     """
     try:
         if image is None:
             return image
 
         # Handle 4-channel BGRA images
-        if len(image.shape) == 3 and image.shape[2] == 4:
+        has_alpha = len(image.shape) == 3 and image.shape[2] == 4
+        if has_alpha:
             bgr = image[:, :, :3]
             alpha = image[:, :, 3]
-            denoised = cv2.bilateralFilter(bgr, d=7, sigmaColor=35, sigmaSpace=35)
-            return cv2.merge([denoised, alpha])
+        else:
+            bgr = image
 
-        # 3-channel BGR or 1-channel Grayscale
-        return cv2.bilateralFilter(image, d=7, sigmaColor=35, sigmaSpace=35)
+        is_color = len(bgr.shape) == 3 and bgr.shape[2] == 3
+        h, w = bgr.shape[:2]
+
+        if is_color:
+            lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+            l_chan, a_chan, b_chan = cv2.split(lab)
+            gray = l_chan
+        else:
+            gray = bgr
+
+        # Fast background illumination estimation on downscaled plane
+        down_w = 400
+        down_h = max(int(h * (down_w / float(w))), 1)
+        small_gray = cv2.resize(gray, (down_w, down_h), interpolation=cv2.INTER_AREA)
+
+        # Morphological closing with structuring element to capture background paper
+        ksize = 25
+        se = cv2.getStructuringElement(cv2.MORPH_RECT, (ksize, ksize))
+        bg_small = cv2.morphologyEx(small_gray, cv2.MORPH_CLOSE, se)
+        bg_small = cv2.GaussianBlur(bg_small, (15, 15), 0)
+
+        # Upscale background illumination
+        bg = cv2.resize(bg_small, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+        bg = np.maximum(bg, 1.0)
+
+        # Relative ink contrast ratio: R = gray / bg
+        ratio = gray.astype(np.float32) / bg
+
+        # High-threshold: bleed-through text typically has ratio in [0.85, 0.98]
+        # Primary front-page text has ratio < 0.82
+        t_high = 0.87
+
+        # Non-linear contrast mapping:
+        # Ratio >= t_high becomes pure paper white (255)
+        clean_l = np.full((h, w), 255.0, dtype=np.float32)
+        ink_mask = ratio < t_high
+
+        # Power curve darkening on ink strokes to make front ink crisp and solid
+        norm_t = ratio[ink_mask] / t_high  # 0.0 to 1.0
+        clean_l[ink_mask] = 255.0 * np.power(norm_t, 1.3)
+        clean_l = np.clip(clean_l, 0, 255).astype(np.uint8)
+
+        # Vectorized Connected Component speckle removal
+        # Detect dark dust / toner specks on paper background
+        fg_mask = (clean_l < 220).astype(np.uint8) * 255
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(fg_mask, connectivity=8)
+
+        if num_labels > 1:
+            areas = stats[:, cv2.CC_STAT_AREA]
+            widths = stats[:, cv2.CC_STAT_WIDTH]
+            heights = stats[:, cv2.CC_STAT_HEIGHT]
+            # Isolated specks: area <= 6 or (area <= 14 and (width <= 3 or height <= 3))
+            # Punctuation dots (periods, i-dots) have area >= 14 and width >= 4
+            noise_indices = np.where(
+                ((areas <= 6) | ((areas <= 14) & ((widths <= 3) | (heights <= 3))))
+            )[0]
+            noise_indices = noise_indices[noise_indices > 0]
+            if len(noise_indices) > 0:
+                is_noise_lut = np.zeros(num_labels, dtype=bool)
+                is_noise_lut[noise_indices] = True
+                noise_mask = is_noise_lut[labels]
+                clean_l[noise_mask] = 255
+
+        # Reconstruct color or grayscale
+        if is_color:
+            # Paper mask: neutralize yellowing/stains on white paper
+            paper_mask = clean_l >= 248
+            a_chan[paper_mask] = 128
+            b_chan[paper_mask] = 128
+
+            merged_lab = cv2.merge([clean_l, a_chan, b_chan])
+            result = cv2.cvtColor(merged_lab, cv2.COLOR_LAB2BGR)
+        else:
+            result = clean_l
+
+        if has_alpha:
+            return cv2.merge([result, alpha])
+        return result
     except Exception:
         return image
 
@@ -512,14 +591,16 @@ def enhance_output(image, mode="color"):
     try:
         if mode == "original":
             return image
-            
+
         elif mode == "grayscale":
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
-            # CLAHE contrast enhancement
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            enhanced = clahe.apply(gray)
+            # Slight contrast enhancement while preserving pure white paper
+            paper_mask = gray >= 248
+            norm = gray.astype(np.float32) / 255.0
+            enhanced = np.clip(np.power(norm, 1.15) * 255.0, 0, 255).astype(np.uint8)
+            enhanced[paper_mask] = 255
             return enhanced
-            
+
         elif mode == "bw":
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
             # High-quality Gaussian adaptive threshold
@@ -530,21 +611,13 @@ def enhance_output(image, mode="color"):
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
             cleaned = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
             return cleaned
-            
+
         else: # Default: 'color'
             if len(image.shape) != 3:
                 return image
-            # Enhance lightness in LAB space
-            lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-            l, a, b = cv2.split(lab)
-            clahe = cv2.createCLAHE(clipLimit=1.8, tileGridSize=(8, 8))
-            cl = clahe.apply(l)
-            merged = cv2.merge((cl, a, b))
-            enhanced = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
-            
-            # Subtle unsharp mask for crisp text
-            gaussian = cv2.GaussianBlur(enhanced, (0, 0), 2.0)
-            sharpened = cv2.addWeighted(enhanced, 1.25, gaussian, -0.25, 0)
+            # Subtle unsharp mask for crisp text edges
+            gaussian = cv2.GaussianBlur(image, (0, 0), 1.5)
+            sharpened = cv2.addWeighted(image, 1.25, gaussian, -0.25, 0)
             return sharpened
     except Exception:
         return image

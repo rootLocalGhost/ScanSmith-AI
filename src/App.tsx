@@ -17,6 +17,7 @@ interface PageCvOverride {
   margins?: boolean;
   denoise?: boolean;
   mode?: "color" | "grayscale" | "bw" | "original";
+  engine?: "neural" | "opencv";
 }
 
 interface PresetInfo {
@@ -221,6 +222,15 @@ export default function App() {
   const [cvFilterMode, setCvFilterMode] = createSignal<"color" | "grayscale" | "bw" | "original">(
     (localStorage.getItem("SCANSMITH_CV_MODE") as any) || "color"
   );
+  const [cvEngine, setCvEngine] = createSignal<"neural" | "opencv">(
+    (localStorage.getItem("SCANSMITH_CV_ENGINE") as any) || "neural"
+  );
+  const [neuralGpuInfo, setNeuralGpuInfo] = createSignal<{
+    available: boolean;
+    device: string;
+    device_name: string;
+    model_ready: boolean;
+  } | null>(null);
   const [isCvStale, setIsCvStale] = createSignal(false);
   const [imageVersion, setImageVersion] = createSignal(Date.now());
   const [lightboxCompareMode, setLightboxCompareMode] = createSignal<"single" | "compare">("single");
@@ -234,6 +244,12 @@ export default function App() {
   const selectCvFilterMode = (mode: "color" | "grayscale" | "bw" | "original") => {
     setCvFilterMode(mode);
     localStorage.setItem("SCANSMITH_CV_MODE", mode);
+    setIsCvStale(true);
+  };
+
+  const selectCvEngine = (engine: "neural" | "opencv") => {
+    setCvEngine(engine);
+    localStorage.setItem("SCANSMITH_CV_ENGINE", engine);
     setIsCvStale(true);
   };
 
@@ -327,6 +343,15 @@ export default function App() {
       setProgressPct(event.payload.percent);
       setProgressMsg(event.payload.message);
     });
+
+    // Check Intel Arc A770 Neural Engine availability
+    invoke<any>("get_neural_engine_status")
+      .then((status) => {
+        if (status) setNeuralGpuInfo(status);
+      })
+      .catch((err) => {
+        console.warn("Could not check neural engine GPU status:", err);
+      });
 
     getCurrentWebview().onDragDropEvent((e) => {
       if (e.payload.type === "drop" && e.payload.paths) {
@@ -627,6 +652,7 @@ export default function App() {
           shadows: cvShadows(),
           denoise: cvDenoise(),
           mode: cvFilterMode(),
+          engine: cvEngine(),
           overrides: overridesPayload
         }
       });
@@ -634,7 +660,8 @@ export default function App() {
       setIsCvStale(false);
       setImageVersion(Date.now());
       setViewMode("cleaned");
-      addToast(`Optimized ${results.length} pages via OpenCV`, "success");
+      const engineName = cvEngine() === "neural" ? "CamScanner AI (Arc A770)" : "OpenCV";
+      addToast(`Optimized ${results.length} pages via ${engineName}`, "success");
       return results;
     } catch (err: any) {
       const errMsg = `${err}`;
@@ -1029,7 +1056,7 @@ export default function App() {
               class={`sidebar-tab-btn ${activeSidebarTab() === 'cv' ? 'active' : ''}`}
               onClick={() => setActiveSidebarTab('cv')}
             >
-              <span>⚡</span> OpenCV
+              <span>⚡</span> AI Scan & CV
             </button>
             <button
               class={`sidebar-tab-btn ${activeSidebarTab() === 'output' ? 'active' : ''}`}
@@ -1126,8 +1153,64 @@ export default function App() {
               </div>
             </Show>
 
-            {/* OpenCV Pipeline Tab */}
+            {/* AI Scan & CV Pipeline Tab */}
             <Show when={activeSidebarTab() === 'cv'}>
+              {/* Processing Engine Selector */}
+              <div class="setting-section">
+                <div class="setting-title-row">
+                  <label class="setting-label">Processing Engine</label>
+                  <span class="setting-hint">Hardware-Accelerated</span>
+                </div>
+                <div class="engine-selector-grid">
+                  <button
+                    class={`engine-btn ${cvEngine() === 'neural' ? 'active' : ''}`}
+                    onClick={() => selectCvEngine('neural')}
+                    type="button"
+                  >
+                    <div class="engine-btn-header">
+                      <span class="engine-btn-icon">⚡</span>
+                      <span class="engine-btn-title">CamScanner AI</span>
+                      <span class="engine-badge-ai">SOTA</span>
+                    </div>
+                    <div class="engine-btn-desc">
+                      DocRes Neural Transformer on Intel Arc A770. Eradicates bleed-through & creases.
+                    </div>
+                  </button>
+                  <button
+                    class={`engine-btn ${cvEngine() === 'opencv' ? 'active' : ''}`}
+                    onClick={() => selectCvEngine('opencv')}
+                    type="button"
+                  >
+                    <div class="engine-btn-header">
+                      <span class="engine-btn-icon">📐</span>
+                      <span class="engine-btn-title">OpenCV Fast</span>
+                      <span class="engine-badge-cv">Classic</span>
+                    </div>
+                    <div class="engine-btn-desc">
+                      High-speed classical vision pipeline for quick batches.
+                    </div>
+                  </button>
+                </div>
+
+                {/* GPU Hardware Status Card */}
+                <Show when={neuralGpuInfo()?.available}>
+                  <div class="neural-hardware-card">
+                    <div class="neural-hardware-header">
+                      <span class="pulse-dot"></span>
+                      <span class="neural-hw-title">
+                        {neuralGpuInfo()?.device_name || "Intel(R) Arc(TM) A770 Graphics (dGPU)"}
+                      </span>
+                      <span class="neural-hw-tag">Xe Matrix Active</span>
+                    </div>
+                    <div class="neural-hw-meta">
+                      <span>Accel: <strong>OpenVINO FP16</strong></span>
+                      <span>•</span>
+                      <span>Model: <strong>DocRes Restormer</strong></span>
+                    </div>
+                  </div>
+                </Show>
+              </div>
+
               {/* Enhancement Filter Mode */}
               <div class="setting-section">
                 <div class="setting-title-row">

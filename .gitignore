@@ -18,3 +18,6 @@ aura_temp
 __pycache__
 *.pyc
 .DS_Store
+*.pkl
+models/*.bin
+src-tauri/models/*.bin

@@ -622,7 +622,110 @@ def enhance_output(image, mode="color"):
     except Exception:
         return image
 
-def process_image(input_path, output_dir, idx, do_split, do_orient, do_deskew, do_margins, do_shadows=True, do_denoise=True, filter_mode="color"):
+class IntelArcNeuralEngine:
+    """
+    Hardware-accelerated Deep Learning Document Restoration Engine.
+    Executes DocRes / Restormer (CVPR 2024) via OpenVINO FP16 on Intel Arc A770 dGPU.
+    - True semantic back-page bleed-through / show-through removal
+    - Deep document appearance restoration & deshadowing
+    - Automatic fallback to high-precision OpenCV engine if model or GPU is unavailable
+    """
+    _instance = None
+    _compiled_model = None
+    _target_device = None
+    _device_name = None
+
+    @classmethod
+    def get_instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self.available = False
+        self.model_path = None
+        self._init_engine()
+
+    def _init_engine(self):
+        try:
+            import openvino as ov
+            self.core = ov.Core()
+            devices = self.core.available_devices
+            self._target_device = "GPU" if "GPU" in devices else ("CPU" if "CPU" in devices else None)
+            if self._target_device:
+                try:
+                    self._device_name = self.core.get_property(self._target_device, "FULL_DEVICE_NAME")
+                except Exception:
+                    self._device_name = self._target_device
+
+            # Look for OpenVINO IR model file
+            possible_paths = [
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "docres_fp16.xml"),
+                os.path.join(os.getcwd(), "models", "docres_fp16.xml"),
+                os.path.join(os.getcwd(), "src-tauri", "models", "docres_fp16.xml"),
+                os.path.expanduser("~/.config/scansmith_ai/models/docres_fp16.xml"),
+            ]
+            for p in possible_paths:
+                if os.path.exists(p):
+                    self.model_path = p
+                    break
+
+            self.available = (self._target_device is not None) and (self.model_path is not None)
+        except Exception:
+            self.available = False
+
+    def load_model(self):
+        if not self.available:
+            return False
+        if self._compiled_model is not None:
+            return True
+        try:
+            model = self.core.read_model(self.model_path)
+            model.reshape([1, 6, 1024, 1024])
+            self._compiled_model = self.core.compile_model(model, self._target_device)
+            return True
+        except Exception as e:
+            print(f"[Warning] Failed to compile Neural Engine on {self._target_device}: {e}", file=sys.stderr)
+            return False
+
+    def restore_appearance(self, image):
+        """Restores document appearance (bleed-through eradication & deshadowing) using DocRes on Intel Arc A770"""
+        if not self.load_model():
+            return None
+        try:
+            h, w = image.shape[:2]
+            resized = cv2.resize(image, (1024, 1024))
+            rgb_planes = cv2.split(resized)
+            result_norm_planes = []
+            for plane in rgb_planes:
+                dilated_img = cv2.dilate(plane, np.ones((7, 7), np.uint8))
+                bg_img = cv2.medianBlur(dilated_img, 21)
+                diff_img = 255 - cv2.absdiff(plane, bg_img)
+                norm_img = cv2.normalize(
+                    diff_img, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8UC1
+                )
+                result_norm_planes.append(norm_img)
+            result_norm = cv2.merge(result_norm_planes)
+
+            prompt = cv2.resize(result_norm, (1024, 1024))
+            in_im = np.concatenate((resized, prompt), axis=-1)
+            in_tensor = (in_im.astype(np.float32) / 255.0).transpose(2, 0, 1)[None, ...]
+
+            pred = self._compiled_model([in_tensor])[0]
+            pred = np.clip(pred[0].transpose(1, 2, 0), 0.0, 1.0) * 255.0
+            pred[pred == 0] = 1.0
+
+            shadow_map = cv2.resize(image.astype(float), (1024, 1024)) / pred
+            shadow_map = cv2.resize(shadow_map, (w, h))
+            shadow_map[shadow_map == 0] = 0.00001
+
+            out_im = np.clip(image.astype(float) / shadow_map, 0, 255).astype(np.uint8)
+            return out_im
+        except Exception as e:
+            print(f"[Warning] Neural restoration failed: {e}", file=sys.stderr)
+            return None
+
+def process_image(input_path, output_dir, idx, do_split, do_orient, do_deskew, do_margins, do_shadows=True, do_denoise=True, filter_mode="color", engine="neural"):
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Input image not found: {input_path}")
 
@@ -643,6 +746,8 @@ def process_image(input_path, output_dir, idx, do_split, do_orient, do_deskew, d
     results = []
     os.makedirs(output_dir, exist_ok=True)
 
+    neural_engine = IntelArcNeuralEngine.get_instance() if engine == "neural" else None
+
     for sub_idx, page in enumerate(pages):
         current = page
 
@@ -660,22 +765,32 @@ def process_image(input_path, output_dir, idx, do_split, do_orient, do_deskew, d
             except Exception as e:
                 print(f"[Warning] Deskew failed for page {idx}_{sub_idx}: {e}", file=sys.stderr)
 
-        # Step 4: Shadow & crease removal
-        if do_shadows:
-            try:
-                current = remove_shadows(current)
-            except Exception as e:
-                print(f"[Warning] Shadow removal failed for page {idx}_{sub_idx}: {e}", file=sys.stderr)
-
-        # Step 5: Auto crop & uniform margins
+        # Step 4: Auto crop & uniform margins
         if do_margins:
             try:
                 current = crop_content_and_margins(current, margin=50)
             except Exception as e:
                 print(f"[Warning] Margin crop failed for page {idx}_{sub_idx}: {e}", file=sys.stderr)
 
-        # Step 6: Denoise & despeckle
-        if do_denoise:
+        # Step 5: Document Restoration (Neural AI Engine or OpenCV Engine)
+        neural_success = False
+        if neural_engine and neural_engine.available:
+            try:
+                restored = neural_engine.restore_appearance(current)
+                if restored is not None:
+                    current = restored
+                    neural_success = True
+            except Exception as e:
+                print(f"[Warning] Neural engine execution failed for page {idx}_{sub_idx}: {e}", file=sys.stderr)
+
+        if not neural_success and do_shadows:
+            try:
+                current = remove_shadows(current)
+            except Exception as e:
+                print(f"[Warning] Shadow removal failed for page {idx}_{sub_idx}: {e}", file=sys.stderr)
+
+        # Step 6: Denoise & despeckle (connected component speckle purge)
+        if do_denoise or not neural_success:
             try:
                 current = despeckle_image(current)
             except Exception as e:
@@ -695,6 +810,26 @@ def process_image(input_path, output_dir, idx, do_split, do_orient, do_deskew, d
     return results
 
 if __name__ == "__main__":
+    if "--check-neural-gpu" in sys.argv:
+        try:
+            engine = IntelArcNeuralEngine.get_instance()
+            info = {
+                "available": bool(engine.available),
+                "device": engine._target_device or "None",
+                "device_name": engine._device_name or "None",
+                "model_ready": bool(engine.model_path and os.path.exists(engine.model_path))
+            }
+            print(json.dumps(info))
+        except Exception as e:
+            print(json.dumps({
+                "available": False,
+                "device": "None",
+                "device_name": "None",
+                "model_ready": False,
+                "error": str(e)
+            }))
+        sys.exit(0)
+
     try:
         parser = argparse.ArgumentParser()
         parser.add_argument("--input", required=True)
@@ -707,6 +842,7 @@ if __name__ == "__main__":
         parser.add_argument("--shadows", type=int, default=1)
         parser.add_argument("--denoise", type=int, default=0)
         parser.add_argument("--mode", type=str, default="color")
+        parser.add_argument("--engine", type=str, default="neural", choices=["neural", "opencv"])
         args = parser.parse_args()
 
         generated_files = process_image(
@@ -719,7 +855,8 @@ if __name__ == "__main__":
             do_margins=bool(args.margins),
             do_shadows=bool(args.shadows),
             do_denoise=bool(args.denoise),
-            filter_mode=args.mode
+            filter_mode=args.mode,
+            engine=args.engine
         )
         print(json.dumps({"success": True, "files": generated_files}))
     except Exception as e:

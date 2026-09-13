@@ -402,6 +402,7 @@ async fn preprocess_images(
     let shadows = if settings["shadows"].as_bool().unwrap_or(true) { "1" } else { "0" };
     let denoise = if settings["denoise"].as_bool().unwrap_or(false) { "1" } else { "0" };
     let mode = settings["mode"].as_str().unwrap_or("color");
+    let engine = settings["engine"].as_str().unwrap_or("neural");
 
     let mut tasks = Vec::new();
     let total = image_paths.len() as f32;
@@ -490,7 +491,7 @@ async fn preprocess_images(
             continue;
         }
 
-        let (s, o, d, m, sh, dn, md) = if use_custom {
+        let (s, o, d, m, sh, dn, md, eng) = if use_custom {
             if let Some(po) = page_override {
                 let s_val = po.get("split").and_then(|v| v.as_bool()).map(|b| if b { "1" } else { "0" }).unwrap_or(split);
                 let o_val = po.get("orient").and_then(|v| v.as_bool()).map(|b| if b { "1" } else { "0" }).unwrap_or(orient);
@@ -499,17 +500,18 @@ async fn preprocess_images(
                 let sh_val = po.get("shadows").and_then(|v| v.as_bool()).map(|b| if b { "1" } else { "0" }).unwrap_or(shadows);
                 let dn_val = po.get("denoise").and_then(|v| v.as_bool()).map(|b| if b { "1" } else { "0" }).unwrap_or(denoise);
                 let md_val = po.get("mode").and_then(|v| v.as_str()).unwrap_or(mode);
-                (s_val.to_string(), o_val.to_string(), d_val.to_string(), m_val.to_string(), sh_val.to_string(), dn_val.to_string(), md_val.to_string())
+                let eng_val = po.get("engine").and_then(|v| v.as_str()).unwrap_or(engine);
+                (s_val.to_string(), o_val.to_string(), d_val.to_string(), m_val.to_string(), sh_val.to_string(), dn_val.to_string(), md_val.to_string(), eng_val.to_string())
             } else {
-                (split.to_string(), orient.to_string(), deskew.to_string(), margins.to_string(), shadows.to_string(), denoise.to_string(), mode.to_string())
+                (split.to_string(), orient.to_string(), deskew.to_string(), margins.to_string(), shadows.to_string(), denoise.to_string(), mode.to_string(), engine.to_string())
             }
         } else {
-            (split.to_string(), orient.to_string(), deskew.to_string(), margins.to_string(), shadows.to_string(), denoise.to_string(), mode.to_string())
+            (split.to_string(), orient.to_string(), deskew.to_string(), margins.to_string(), shadows.to_string(), denoise.to_string(), mode.to_string(), engine.to_string())
         };
 
         eprintln!(
-            "[OpenCV Task] Page idx={}: use_custom={}, split={}, orient={}, deskew={}, margins={}, shadows={}, denoise={}, mode={}",
-            idx, use_custom, s, o, d, m, sh, dn, md
+            "[Processing Task] Page idx={}: use_custom={}, split={}, orient={}, deskew={}, margins={}, shadows={}, denoise={}, mode={}, engine={}",
+            idx, use_custom, s, o, d, m, sh, dn, md, eng
         );
 
         tasks.push(tokio::task::spawn_blocking(move || {
@@ -537,6 +539,8 @@ async fn preprocess_images(
                     &dn,
                     "--mode",
                     &md,
+                    "--engine",
+                    &eng,
                 ]);
 
             #[cfg(target_os = "windows")]
@@ -601,10 +605,29 @@ async fn preprocess_images(
         "process-progress",
         Progress {
             percent: 100.0,
-            message: "OpenCV Processing Complete!".into(),
+            message: "Document Processing Complete!".into(),
         },
     );
     Ok(final_paths)
+}
+
+#[tauri::command]
+async fn get_neural_engine_status() -> Result<serde_json::Value, String> {
+    let script_path = ensure_cv_script_available()?;
+    let env_path = get_enriched_path();
+    let python_bin = resolve_python_binary(&env_path);
+
+    let output = std::process::Command::new(&python_bin)
+        .env("PATH", &env_path)
+        .args([script_path.to_str().unwrap(), "--check-neural-gpu"])
+        .output()
+        .map_err(|e| format!("Failed to execute python: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+        Ok(val) => Ok(val),
+        Err(e) => Err(format!("Failed to parse neural GPU status: {}. Output: {}", e, stdout)),
+    }
 }
 
 fn build_gemini_client() -> Result<reqwest::Client, String> {
@@ -1215,6 +1238,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             preprocess_images,
+            get_neural_engine_status,
             generate_docx,
             open_document,
             rotate_page,

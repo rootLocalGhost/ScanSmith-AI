@@ -35,7 +35,7 @@
   },
   "devDependencies": {
     "typescript": "~7.0.2",
-    "vite": "^8.2.2",
+    "vite": "^8.3.0",
     "vite-plugin-solid": "^2.11.14",
     "@tauri-apps/cli": "^2"
   }

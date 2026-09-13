@@ -253,6 +253,59 @@ export default function App() {
     setIsCvStale(true);
   };
 
+  // Adjustable & Retractable Sidebar State
+  const initialSidebarWidth = Math.min(
+    650,
+    Math.max(280, parseInt(localStorage.getItem("SCANSMITH_SIDEBAR_WIDTH") || "380", 10))
+  );
+  const [sidebarWidth, setSidebarWidth] = createSignal(initialSidebarWidth);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = createSignal(
+    localStorage.getItem("SCANSMITH_SIDEBAR_COLLAPSED") === "true"
+  );
+  const [isDraggingSidebar, setIsDraggingSidebar] = createSignal(false);
+
+  // Modular sections collapse state
+  const [openSections, setOpenSections] = createSignal<{ [key: string]: boolean }>({
+    engine: true,
+    filter: true,
+    tools: true,
+    quota: true,
+  });
+
+  const toggleSection = (section: string) => {
+    setOpenSections((prev) => ({ ...prev, [section]: !prev[section] }));
+  };
+
+  const toggleSidebarCollapse = () => {
+    const next = !isSidebarCollapsed();
+    setIsSidebarCollapsed(next);
+    localStorage.setItem("SCANSMITH_SIDEBAR_COLLAPSED", String(next));
+  };
+
+  const startSidebarResize = (e: MouseEvent) => {
+    e.preventDefault();
+    setIsDraggingSidebar(true);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      const newWidth = Math.min(650, Math.max(280, moveEvent.clientX));
+      setSidebarWidth(newWidth);
+    };
+
+    const onMouseUp = () => {
+      setIsDraggingSidebar(false);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      localStorage.setItem("SCANSMITH_SIDEBAR_WIDTH", String(sidebarWidth()));
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+  };
+
   // Document & Image State
   const [images, setImages] = createSignal<string[]>([]);
   const [cleanedImages, setCleanedImages] = createSignal<string[]>([]);
@@ -274,7 +327,7 @@ export default function App() {
   const [lastError, setLastError] = createSignal<string | null>(null);
 
   // UI Modals & Drawers
-  const [activeSidebarTab, setActiveSidebarTab] = createSignal<"ai" | "cv" | "output">("ai");
+  const [activeSidebarTab, setActiveSidebarTab] = createSignal<"ai" | "cv" | "output" | "quota">("ai");
   const [showSettingsDrawer, setShowSettingsDrawer] = createSignal(false);
   const [showHistoryDrawer, setShowHistoryDrawer] = createSignal(false);
   const [lightboxImg, setLightboxImg] = createSignal<string | null>(null);
@@ -1042,27 +1095,65 @@ export default function App() {
       {/* ==================================================================
           Main Split View Workspace
           ================================================================== */}
+      {/* Floating Expand Sidebar Button (when retracted) */}
+      <Show when={isSidebarCollapsed()}>
+        <button
+          class="sidebar-floating-expand-btn"
+          onClick={toggleSidebarCollapse}
+          title="Open Controls Panel"
+          type="button"
+        >
+          <span class="expand-icon">▶</span>
+          <span class="expand-text">Panel</span>
+          <span class={`expand-badge ${cvEngine() === 'neural' ? 'ai' : 'cv'}`}>
+            {cvEngine() === 'neural' ? '⚡ AI' : '📐 CV'}
+          </span>
+        </button>
+      </Show>
+
       <main class="main-workspace">
         {/* Left Inspector Sidebar */}
-        <aside class="inspector-sidebar">
+        <aside
+          class={`inspector-sidebar ${isSidebarCollapsed() ? 'collapsed' : ''} ${isDraggingSidebar() ? 'resizing' : ''}`}
+          style={{ width: isSidebarCollapsed() ? '0px' : `${sidebarWidth()}px` }}
+        >
           <div class="sidebar-tabs">
             <button
               class={`sidebar-tab-btn ${activeSidebarTab() === 'ai' ? 'active' : ''}`}
               onClick={() => setActiveSidebarTab('ai')}
+              title="AI Presets & Models"
             >
-              <span>🤖</span> AI Presets
+              <span>🤖</span> Presets
             </button>
             <button
               class={`sidebar-tab-btn ${activeSidebarTab() === 'cv' ? 'active' : ''}`}
               onClick={() => setActiveSidebarTab('cv')}
+              title="CamScanner AI & Computer Vision Filters"
             >
-              <span>⚡</span> AI Scan & CV
+              <span>⚡</span> Scan & CV
             </button>
             <button
               class={`sidebar-tab-btn ${activeSidebarTab() === 'output' ? 'active' : ''}`}
               onClick={() => setActiveSidebarTab('output')}
+              title="DOCX Output & Naming"
             >
               <span>⚙️</span> Export
+            </button>
+            <button
+              class={`sidebar-tab-btn ${activeSidebarTab() === 'quota' ? 'active' : ''}`}
+              onClick={() => setActiveSidebarTab('quota')}
+              title="Gemini API Quota & Usage Analytics"
+            >
+              <span>📊</span> Quota
+            </button>
+            <button
+              class="sidebar-retract-btn"
+              onClick={toggleSidebarCollapse}
+              title="Retract Sidebar (Maximize Canvas)"
+              aria-label="Retract Sidebar"
+              type="button"
+            >
+              ◀
             </button>
           </div>
 
@@ -1154,209 +1245,208 @@ export default function App() {
             </Show>
 
             {/* AI Scan & CV Pipeline Tab */}
+            {/* AI Scan & CV Pipeline Tab - Ultra Compact & Non-Scrolling */}
             <Show when={activeSidebarTab() === 'cv'}>
-              {/* Processing Engine Selector */}
-              <div class="setting-section">
-                <div class="setting-title-row">
-                  <label class="setting-label">Processing Engine</label>
-                  <span class="setting-hint">Hardware-Accelerated</span>
+              {/* Sleek 1-Line Status Strip */}
+              <div class={`engine-status-strip ${cvEngine() === 'neural' ? 'ai' : 'cv'}`}>
+                <div class="engine-strip-left">
+                  <span class={`engine-status-dot ${cvEngine() === 'neural' ? 'neural' : 'classic'}`}></span>
+                  <strong class="engine-strip-title">
+                    {cvEngine() === 'neural' ? "CamScanner AI Active" : "OpenCV Vision Active"}
+                  </strong>
+                  <span class="engine-strip-hw">
+                    {cvEngine() === 'neural' ? "Arc A770 (XMX FP16)" : "CPU Math"}
+                  </span>
                 </div>
-                <div class="engine-selector-grid">
+                <span class={`engine-strip-badge ${cvEngine() === 'neural' ? 'ai' : 'cv'}`}>
+                  {cvEngine() === 'neural' ? '⚡ SOTA' : '📐 FAST'}
+                </span>
+              </div>
+
+              {/* Module 1: Processing Engine Selector (Compact Segmented Switch) */}
+              <div class="compact-control-group">
+                <div class="compact-group-label">
+                  <span>Engine Architecture</span>
+                  <Show when={neuralGpuInfo()?.available && cvEngine() === 'neural'}>
+                    <span class="gpu-active-badge">● Intel Arc A770</span>
+                  </Show>
+                </div>
+                <div class="compact-segment-row">
                   <button
-                    class={`engine-btn ${cvEngine() === 'neural' ? 'active' : ''}`}
+                    class={`compact-segment-btn ${cvEngine() === 'neural' ? 'active-ai' : ''}`}
                     onClick={() => selectCvEngine('neural')}
                     type="button"
+                    title="DocRes Neural Transformer on Intel Arc A770 GPU. Eradicates bleed-through & creases."
                   >
-                    <div class="engine-btn-header">
-                      <span class="engine-btn-icon">⚡</span>
-                      <span class="engine-btn-title">CamScanner AI</span>
-                      <span class="engine-badge-ai">SOTA</span>
-                    </div>
-                    <div class="engine-btn-desc">
-                      DocRes Neural Transformer on Intel Arc A770. Eradicates bleed-through & creases.
-                    </div>
+                    <span class="seg-icon">⚡</span>
+                    <span class="seg-label">CamScanner AI</span>
+                    <span class="seg-badge-ai">SOTA</span>
                   </button>
                   <button
-                    class={`engine-btn ${cvEngine() === 'opencv' ? 'active' : ''}`}
+                    class={`compact-segment-btn ${cvEngine() === 'opencv' ? 'active-cv' : ''}`}
                     onClick={() => selectCvEngine('opencv')}
                     type="button"
+                    title="High-speed classical vision pipeline on CPU. Fast deskew & binarization."
                   >
-                    <div class="engine-btn-header">
-                      <span class="engine-btn-icon">📐</span>
-                      <span class="engine-btn-title">OpenCV Fast</span>
-                      <span class="engine-badge-cv">Classic</span>
-                    </div>
-                    <div class="engine-btn-desc">
-                      High-speed classical vision pipeline for quick batches.
-                    </div>
+                    <span class="seg-icon">📐</span>
+                    <span class="seg-label">OpenCV Fast</span>
+                    <span class="seg-badge-cv">CPU</span>
                   </button>
                 </div>
-
-                {/* GPU Hardware Status Card */}
-                <Show when={neuralGpuInfo()?.available}>
-                  <div class="neural-hardware-card">
-                    <div class="neural-hardware-header">
-                      <span class="pulse-dot"></span>
-                      <span class="neural-hw-title">
-                        {neuralGpuInfo()?.device_name || "Intel(R) Arc(TM) A770 Graphics (dGPU)"}
-                      </span>
-                      <span class="neural-hw-tag">Xe Matrix Active</span>
-                    </div>
-                    <div class="neural-hw-meta">
-                      <span>Accel: <strong>OpenVINO FP16</strong></span>
-                      <span>•</span>
-                      <span>Model: <strong>DocRes Restormer</strong></span>
-                    </div>
-                  </div>
-                </Show>
               </div>
 
-              {/* Enhancement Filter Mode */}
-              <div class="setting-section">
-                <div class="setting-title-row">
-                  <label class="setting-label">Enhancement Filter</label>
-                  <span class="setting-hint">Document style</span>
+              {/* Module 2: Enhancement Style & Color (Compact 4-Pill Bar) */}
+              <div class="compact-control-group">
+                <div class="compact-group-label">
+                  <span>Enhancement Style</span>
+                  <span class="compact-group-val">{cvFilterMode().toUpperCase()}</span>
                 </div>
-                <div class="filter-mode-grid">
+                <div class="style-pills-row">
                   <button
-                    class={`filter-mode-btn ${cvFilterMode() === 'color' ? 'active' : ''}`}
+                    class={`style-pill-btn ${cvFilterMode() === 'color' ? 'active' : ''}`}
                     onClick={() => selectCvFilterMode('color')}
                     type="button"
+                    title="Color Doc: Whitens paper, preserves ink and marker colors"
                   >
-                    <div class="filter-mode-icon">🎨</div>
-                    <div class="filter-mode-text">
-                      <div class="filter-mode-title">Color Doc</div>
-                      <div class="filter-mode-sub">Whitens paper, keeps pen & colors</div>
-                    </div>
+                    <span class="pill-icon">🎨</span>
+                    <span class="pill-label">Color</span>
                   </button>
                   <button
-                    class={`filter-mode-btn ${cvFilterMode() === 'grayscale' ? 'active' : ''}`}
+                    class={`style-pill-btn ${cvFilterMode() === 'grayscale' ? 'active' : ''}`}
                     onClick={() => selectCvFilterMode('grayscale')}
                     type="button"
+                    title="Grayscale: High-contrast document grayscale"
                   >
-                    <div class="filter-mode-icon">🌑</div>
-                    <div class="filter-mode-text">
-                      <div class="filter-mode-title">Grayscale</div>
-                      <div class="filter-mode-sub">High contrast crisp doc gray</div>
-                    </div>
+                    <span class="pill-icon">🌑</span>
+                    <span class="pill-label">Gray</span>
                   </button>
                   <button
-                    class={`filter-mode-btn ${cvFilterMode() === 'bw' ? 'active' : ''}`}
+                    class={`style-pill-btn ${cvFilterMode() === 'bw' ? 'active' : ''}`}
                     onClick={() => selectCvFilterMode('bw')}
                     type="button"
+                    title="Clean B&W: Adaptive binary, ultra-crisp text"
                   >
-                    <div class="filter-mode-icon">📄</div>
-                    <div class="filter-mode-text">
-                      <div class="filter-mode-title">Clean B&W</div>
-                      <div class="filter-mode-sub">High-legibility adaptive binary</div>
-                    </div>
+                    <span class="pill-icon">📄</span>
+                    <span class="pill-label">B&W</span>
                   </button>
                   <button
-                    class={`filter-mode-btn ${cvFilterMode() === 'original' ? 'active' : ''}`}
+                    class={`style-pill-btn ${cvFilterMode() === 'original' ? 'active' : ''}`}
                     onClick={() => selectCvFilterMode('original')}
                     type="button"
+                    title="Natural: Geometric deskew & crop only, keeps raw photo tones"
                   >
-                    <div class="filter-mode-icon">🖼️</div>
-                    <div class="filter-mode-text">
-                      <div class="filter-mode-title">Natural</div>
-                      <div class="filter-mode-sub">Geometric fixes only, raw photo</div>
-                    </div>
+                    <span class="pill-icon">🖼️</span>
+                    <span class="pill-label">Natural</span>
                   </button>
                 </div>
               </div>
 
-              {/* Toggles */}
-              <div class="setting-section">
-                <div class="setting-title-row">
-                  <label class="setting-label">Correction Tools</label>
-                  <span class="setting-hint">{[cvSplit(), cvOrient(), cvDeskew(), cvMargins(), cvShadows(), cvDenoise()].filter(Boolean).length} Active</span>
+              {/* Module 3: Geometry & Correction Tools (2-Column Compact Interactive Grid) */}
+              <div class="compact-control-group">
+                <div class="compact-group-label">
+                  <span>Correction Tools</span>
+                  <span class="compact-group-val">
+                    {[cvSplit(), cvOrient(), cvDeskew(), cvMargins(), cvShadows(), cvDenoise()].filter(Boolean).length} of 6 ON
+                  </span>
                 </div>
-                <div class="cv-toggles-container">
-                  <div class="toggle-row">
-                    <div class="toggle-info">
-                      <div class="toggle-name">📖 Split 2-Page Spreads</div>
-                      <div class="toggle-desc">Detects center spine & separates dual-page book scans</div>
-                    </div>
-                    <label class="switch">
-                      <input type="checkbox" checked={cvSplit()} onChange={(e) => toggleCvSetting(setCvSplit, "SCANSMITH_CV_SPLIT", e.currentTarget.checked)} />
-                      <span class="slider"></span>
-                    </label>
-                  </div>
+                <div class="tools-grid-2col">
+                  <button
+                    class={`tool-chip-btn ${cvSplit() ? 'active' : ''}`}
+                    onClick={() => toggleCvSetting(setCvSplit, "SCANSMITH_CV_SPLIT", !cvSplit())}
+                    type="button"
+                    title="Detects center book spine and separates 2-page spreads"
+                  >
+                    <span class="tool-chip-check">{cvSplit() ? "✔" : "•"}</span>
+                    <span class="tool-chip-icon">📖</span>
+                    <span class="tool-chip-name">Book Split</span>
+                    <span class="tool-chip-tech cv">CV</span>
+                  </button>
 
-                  <div class="toggle-row">
-                    <div class="toggle-info">
-                      <div class="toggle-name">🧭 Auto Fix Orientation</div>
-                      <div class="toggle-desc">Tesseract OSD automatically rotates upside-down/rotated pages</div>
-                    </div>
-                    <label class="switch">
-                      <input type="checkbox" checked={cvOrient()} onChange={(e) => toggleCvSetting(setCvOrient, "SCANSMITH_CV_ORIENT", e.currentTarget.checked)} />
-                      <span class="slider"></span>
-                    </label>
-                  </div>
+                  <button
+                    class={`tool-chip-btn ${cvOrient() ? 'active' : ''}`}
+                    onClick={() => toggleCvSetting(setCvOrient, "SCANSMITH_CV_ORIENT", !cvOrient())}
+                    type="button"
+                    title="Tesseract OSD automatically rotates upside-down/sideways scans"
+                  >
+                    <span class="tool-chip-check">{cvOrient() ? "✔" : "•"}</span>
+                    <span class="tool-chip-icon">🧭</span>
+                    <span class="tool-chip-name">Auto Rotate</span>
+                    <span class="tool-chip-tech cv">CV</span>
+                  </button>
 
-                  <div class="toggle-row">
-                    <div class="toggle-info">
-                      <div class="toggle-name">📐 Auto Deskew Slant</div>
-                      <div class="toggle-desc">Radon projection variance straightens slanted text lines</div>
-                    </div>
-                    <label class="switch">
-                      <input type="checkbox" checked={cvDeskew()} onChange={(e) => toggleCvSetting(setCvDeskew, "SCANSMITH_CV_DESKEW", e.currentTarget.checked)} />
-                      <span class="slider"></span>
-                    </label>
-                  </div>
+                  <button
+                    class={`tool-chip-btn ${cvDeskew() ? 'active' : ''}`}
+                    onClick={() => toggleCvSetting(setCvDeskew, "SCANSMITH_CV_DESKEW", !cvDeskew())}
+                    type="button"
+                    title="Radon projection variance straightens slanted text lines"
+                  >
+                    <span class="tool-chip-check">{cvDeskew() ? "✔" : "•"}</span>
+                    <span class="tool-chip-icon">📐</span>
+                    <span class="tool-chip-name">Auto Deskew</span>
+                    <span class="tool-chip-tech cv">CV</span>
+                  </button>
 
-                  <div class="toggle-row">
-                    <div class="toggle-info">
-                      <div class="toggle-name">✂️ Auto Crop & Margins</div>
-                      <div class="toggle-desc">Trims dark scanned borders and adds uniform white margins</div>
-                    </div>
-                    <label class="switch">
-                      <input type="checkbox" checked={cvMargins()} onChange={(e) => toggleCvSetting(setCvMargins, "SCANSMITH_CV_MARGINS", e.currentTarget.checked)} />
-                      <span class="slider"></span>
-                    </label>
-                  </div>
+                  <button
+                    class={`tool-chip-btn ${cvMargins() ? 'active' : ''}`}
+                    onClick={() => toggleCvSetting(setCvMargins, "SCANSMITH_CV_MARGINS", !cvMargins())}
+                    type="button"
+                    title="Trims dark scanner borders and applies clean white margins"
+                  >
+                    <span class="tool-chip-check">{cvMargins() ? "✔" : "•"}</span>
+                    <span class="tool-chip-icon">✂️</span>
+                    <span class="tool-chip-name">Crop Margins</span>
+                    <span class="tool-chip-tech cv">CV</span>
+                  </button>
 
-                  <div class="toggle-row">
-                    <div class="toggle-info">
-                      <div class="toggle-name">💡 Shadow & Crease Removal</div>
-                      <div class="toggle-desc">Equalizes illumination, camera shadows & book spine darkness</div>
-                    </div>
-                    <label class="switch">
-                      <input type="checkbox" checked={cvShadows()} onChange={(e) => toggleCvSetting(setCvShadows, "SCANSMITH_CV_SHADOWS", e.currentTarget.checked)} />
-                      <span class="slider"></span>
-                    </label>
-                  </div>
+                  <button
+                    class={`tool-chip-btn ${cvShadows() ? 'active' : ''}`}
+                    onClick={() => toggleCvSetting(setCvShadows, "SCANSMITH_CV_SHADOWS", !cvShadows())}
+                    type="button"
+                    title={cvEngine() === 'neural' ? "DocRes Neural Transformer shadow & crease removal on Intel Arc A770" : "OpenCV morphological illumination equalization"}
+                  >
+                    <span class="tool-chip-check">{cvShadows() ? "✔" : "•"}</span>
+                    <span class="tool-chip-icon">💡</span>
+                    <span class="tool-chip-name">De-Shadow</span>
+                    <span class={`tool-chip-tech ${cvEngine() === 'neural' ? 'ai' : 'cv'}`}>
+                      {cvEngine() === 'neural' ? 'AI' : 'CV'}
+                    </span>
+                  </button>
 
-                  <div class="toggle-row">
-                    <div class="toggle-info">
-                      <div class="toggle-name">✨ Denoise & Despeckle</div>
-                      <div class="toggle-desc">Removes isolated scanner dust specks and background noise</div>
-                    </div>
-                    <label class="switch">
-                      <input type="checkbox" checked={cvDenoise()} onChange={(e) => toggleCvSetting(setCvDenoise, "SCANSMITH_CV_DENOISE", e.currentTarget.checked)} />
-                      <span class="slider"></span>
-                    </label>
-                  </div>
+                  <button
+                    class={`tool-chip-btn ${cvDenoise() ? 'active' : ''}`}
+                    onClick={() => toggleCvSetting(setCvDenoise, "SCANSMITH_CV_DENOISE", !cvDenoise())}
+                    type="button"
+                    title={cvEngine() === 'neural' ? "DocRes AI bleed-through & toner speckle purge on Intel Arc A770" : "Connected-component speckle purge & background whitening"}
+                  >
+                    <span class="tool-chip-check">{cvDenoise() ? "✔" : "•"}</span>
+                    <span class="tool-chip-icon">✨</span>
+                    <span class="tool-chip-name">Despeckle</span>
+                    <span class={`tool-chip-tech ${cvEngine() === 'neural' ? 'ai' : 'cv'}`}>
+                      {cvEngine() === 'neural' ? 'AI' : 'CV'}
+                    </span>
+                  </button>
                 </div>
               </div>
 
-              {/* Action Button */}
+              {/* Action Section */}
               <Show when={images().length > 0}>
-                <div class="setting-section">
+                <div class="compact-action-section">
                   <button
-                    class="btn btn-primary"
-                    style={{ width: "100%", "justify-content": "center" }}
+                    class={`btn ${cvEngine() === 'neural' ? 'btn-neural-action' : 'btn-opencv-action'}`}
+                    style={{ width: "100%", "justify-content": "center", height: "36px", "font-size": "0.84rem" }}
                     onClick={runOpenCV}
                     disabled={isProcessing()}
                   >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style={{ width: "16px", height: "16px" }}>
-                      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-                    </svg>
-                    {isCvStale() ? "Apply Modified Settings" : "Run OpenCV Preprocessing"}
+                    <span>{cvEngine() === 'neural' ? '⚡' : '📐'}</span>
+                    <span>
+                      {isCvStale()
+                        ? (cvEngine() === 'neural' ? "Re-apply CamScanner AI" : "Apply Modified Settings")
+                        : (cvEngine() === 'neural' ? "Run CamScanner AI (Arc A770)" : "Run OpenCV Fast")}
+                    </span>
                   </button>
                   <Show when={isCvStale()}>
-                    <div class="stale-settings-hint">
-                      ⚡ Settings changed. Click above to re-apply to scans.
+                    <div class="stale-settings-hint compact">
+                      ⚡ Settings changed. Click above to re-apply.
                     </div>
                   </Show>
                 </div>
@@ -1426,81 +1516,123 @@ export default function App() {
                 </div>
               </div>
             </Show>
+
+            {/* Quota & Usage Analytics Tab */}
+            <Show when={activeSidebarTab() === 'quota'}>
+              <div class="quota-tab-content">
+                <div class="quota-hero-banner">
+                  <div class="quota-hero-header">
+                    <div class="quota-title">
+                      <span>⚡</span>
+                      <strong>Gemini Quota & Usage</strong>
+                    </div>
+                    <span class={`quota-tier-badge ${activeLimits().tier === 'Paid' ? 'paid' : ''}`}>
+                      {activeLimits().tier} Tier
+                    </span>
+                  </div>
+                  <div class="quota-model-specs">
+                    <span class="quota-model-name" title={selectedModelInfo()?.name || model()}>
+                      {selectedModelInfo()?.name || model()}
+                    </span>
+                    <span>{activeLimits().rpd.toLocaleString()} RPD • {activeLimits().rpm} RPM</span>
+                  </div>
+                </div>
+
+                <div class="quota-progress-box">
+                  <div class="quota-progress-labels">
+                    <span>{apiUsage().requests} / {activeLimits().rpd.toLocaleString()} reqs today</span>
+                    <span class="quota-progress-remaining">
+                      {Math.max(0, activeLimits().rpd - apiUsage().requests).toLocaleString()} left
+                    </span>
+                  </div>
+                  <div class="quota-progress-track">
+                    {(() => {
+                      const pct = Math.min(100, (apiUsage().requests / Math.max(1, activeLimits().rpd)) * 100);
+                      const colorClass = pct > 90 ? 'danger' : pct > 75 ? 'warning' : 'normal';
+                      return (
+                        <div
+                          class={`quota-progress-fill ${colorClass}`}
+                          style={{ width: `${Math.max(pct, apiUsage().requests > 0 ? 3 : 0)}%` }}
+                        ></div>
+                      );
+                    })()}
+                  </div>
+                </div>
+
+                <div class="quota-metrics-row">
+                  <div class="quota-metric-col">
+                    <span class="quota-metric-label">Tokens Today</span>
+                    <span class="quota-metric-val">
+                      {apiUsage().totalTokens >= 1000000
+                        ? `${(apiUsage().totalTokens / 1000000).toFixed(2)}M`
+                        : apiUsage().totalTokens >= 1000
+                        ? `${(apiUsage().totalTokens / 1000).toFixed(1)}k`
+                        : apiUsage().totalTokens}
+                    </span>
+                  </div>
+                  <div class="quota-metric-col">
+                    <span class="quota-metric-label">Quota Used</span>
+                    <span class="quota-metric-val">
+                      {((apiUsage().requests / Math.max(1, activeLimits().rpd)) * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                </div>
+
+                <div class="quota-footer-row">
+                  <span class="quota-reset-text" title="Google resets daily quotas at midnight Pacific Time">
+                    🕒 Resets ~{getHoursUntilPacificMidnight()}h (Midnight PT)
+                  </span>
+                  <button
+                    class="quota-link-btn"
+                    onClick={openAIStudioDashboard}
+                    title="View full quota, rate limits, and billing in Google AI Studio"
+                  >
+                    AI Studio ↗
+                  </button>
+                </div>
+              </div>
+            </Show>
           </div>
 
-          {/* Sidebar API Quota & Usage Monitor */}
-          <div class="sidebar-quota-container">
-            <div class="quota-header-row">
-              <div class="quota-title">
-                <span>⚡</span>
-                API Quota & Usage
-              </div>
-              <span class={`quota-tier-badge ${activeLimits().tier === 'Paid' ? 'paid' : ''}`}>
-                {activeLimits().tier} Tier
+          {/* Mini Quota Footer Ticker (always visible, 1-click toggles Quota tab) */}
+          <div
+            class="sidebar-mini-ticker"
+            onClick={() => setActiveSidebarTab(activeSidebarTab() === 'quota' ? 'cv' : 'quota')}
+            title="Click to toggle detailed Gemini API Quota & Usage analytics"
+          >
+            <div class="ticker-left">
+              <span class="ticker-bolt">⚡</span>
+              <span class="ticker-text">{apiUsage().requests} / {activeLimits().rpd.toLocaleString()} reqs</span>
+              <span class="ticker-dot">•</span>
+              <span class="ticker-text">
+                {apiUsage().totalTokens >= 1000000
+                  ? `${(apiUsage().totalTokens / 1000000).toFixed(1)}M`
+                  : apiUsage().totalTokens >= 1000
+                  ? `${(apiUsage().totalTokens / 1000).toFixed(1)}k`
+                  : apiUsage().totalTokens} toks
               </span>
             </div>
-
-            <div class="quota-model-specs">
-              <span class="quota-model-name" title={selectedModelInfo()?.name || model()}>
-                {selectedModelInfo()?.name || model()}
+            <div class="ticker-right">
+              <span class={`ticker-tier ${activeLimits().tier === 'Paid' ? 'paid' : ''}`}>
+                {activeLimits().tier}
               </span>
-              <span>{activeLimits().rpd.toLocaleString()} RPD • {activeLimits().rpm} RPM</span>
-            </div>
-
-            <div class="quota-progress-box">
-              <div class="quota-progress-labels">
-                <span>{apiUsage().requests} / {activeLimits().rpd.toLocaleString()} reqs today</span>
-                <span class="quota-progress-remaining">
-                  {Math.max(0, activeLimits().rpd - apiUsage().requests).toLocaleString()} left
-                </span>
-              </div>
-              <div class="quota-progress-track">
-                {(() => {
-                  const pct = Math.min(100, (apiUsage().requests / Math.max(1, activeLimits().rpd)) * 100);
-                  const colorClass = pct > 90 ? 'danger' : pct > 75 ? 'warning' : 'normal';
-                  return (
-                    <div
-                      class={`quota-progress-fill ${colorClass}`}
-                      style={{ width: `${Math.max(pct, apiUsage().requests > 0 ? 3 : 0)}%` }}
-                    ></div>
-                  );
-                })()}
-              </div>
-            </div>
-
-            <div class="quota-metrics-row">
-              <div class="quota-metric-col">
-                <span class="quota-metric-label">Tokens Today</span>
-                <span class="quota-metric-val">
-                  {apiUsage().totalTokens >= 1000000
-                    ? `${(apiUsage().totalTokens / 1000000).toFixed(2)}M`
-                    : apiUsage().totalTokens >= 1000
-                    ? `${(apiUsage().totalTokens / 1000).toFixed(1)}k`
-                    : apiUsage().totalTokens}
-                </span>
-              </div>
-              <div class="quota-metric-col">
-                <span class="quota-metric-label">Quota Used</span>
-                <span class="quota-metric-val">
-                  {((apiUsage().requests / Math.max(1, activeLimits().rpd)) * 100).toFixed(1)}%
-                </span>
-              </div>
-            </div>
-
-            <div class="quota-footer-row">
-              <span class="quota-reset-text" title="Google resets daily quotas at midnight Pacific Time">
-                🕒 Resets ~{getHoursUntilPacificMidnight()}h (Midnight PT)
+              <span class="ticker-arrow">
+                {activeSidebarTab() === 'quota' ? '▼' : '↗'}
               </span>
-              <button
-                class="quota-link-btn"
-                onClick={openAIStudioDashboard}
-                title="View full quota, rate limits, and billing in Google AI Studio"
-              >
-                AI Studio ↗
-              </button>
             </div>
           </div>
         </aside>
+
+        {/* Sidebar Drag Resizer Handle */}
+        <Show when={!isSidebarCollapsed()}>
+          <div
+            class={`sidebar-resizer ${isDraggingSidebar() ? 'dragging' : ''}`}
+            onMouseDown={startSidebarResize}
+            title="Drag to resize sidebar width"
+          >
+            <div class="resizer-knob"></div>
+          </div>
+        </Show>
 
         {/* Center Main Stage */}
         <section class="stage-container">

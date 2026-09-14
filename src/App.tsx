@@ -231,6 +231,31 @@ export default function App() {
     device_name: string;
     model_ready: boolean;
   } | null>(null);
+
+  const detectedHardwareShort = () => {
+    const info = neuralGpuInfo();
+    if (!info?.available) return "CPU";
+    const raw = info.device_name;
+    if (!raw || raw === "None") return info.device || "GPU";
+    return raw
+      .replace(/Intel\(R\)\s*/gi, "")
+      .replace(/Arc\(TM\)\s*/gi, "Arc ")
+      .replace(/NVIDIA\s*/gi, "")
+      .replace(/GeForce\s*/gi, "")
+      .replace(/AMD\s*/gi, "")
+      .replace(/Radeon\s*/gi, "Radeon ")
+      .replace(/Graphics\s*/gi, "")
+      .replace(/\(dGPU\)|\(iGPU\)/gi, "")
+      .trim() || raw;
+  };
+
+  const detectedHardwareFull = () => {
+    const info = neuralGpuInfo();
+    if (!info?.available) return "CPU (Classical Vision)";
+    return info.device_name && info.device_name !== "None"
+      ? info.device_name
+      : (info.device ? `${info.device} Accelerator` : "Hardware Accelerator");
+  };
   const [isCvStale, setIsCvStale] = createSignal(false);
   const [imageVersion, setImageVersion] = createSignal(Date.now());
   const [lightboxCompareMode, setLightboxCompareMode] = createSignal<"single" | "compare">("single");
@@ -397,7 +422,7 @@ export default function App() {
       setProgressMsg(event.payload.message);
     });
 
-    // Check Intel Arc A770 Neural Engine availability
+    // Check dynamic Neural Engine accelerator availability
     invoke<any>("get_neural_engine_status")
       .then((status) => {
         if (status) setNeuralGpuInfo(status);
@@ -713,7 +738,7 @@ export default function App() {
       setIsCvStale(false);
       setImageVersion(Date.now());
       setViewMode("cleaned");
-      const engineName = cvEngine() === "neural" ? "CamScanner AI (Arc A770)" : "OpenCV";
+      const engineName = cvEngine() === "neural" ? `ScanSmith Neural AI (${detectedHardwareShort()})` : "OpenCV";
       addToast(`Optimized ${results.length} pages via ${engineName}`, "success");
       return results;
     } catch (err: any) {
@@ -1128,7 +1153,7 @@ export default function App() {
             <button
               class={`sidebar-tab-btn ${activeSidebarTab() === 'cv' ? 'active' : ''}`}
               onClick={() => setActiveSidebarTab('cv')}
-              title="CamScanner AI & Computer Vision Filters"
+              title="ScanSmith Neural AI & Computer Vision Filters"
             >
               <span>⚡</span> Scan & CV
             </button>
@@ -1252,10 +1277,10 @@ export default function App() {
                 <div class="engine-strip-left">
                   <span class={`engine-status-dot ${cvEngine() === 'neural' ? 'neural' : 'classic'}`}></span>
                   <strong class="engine-strip-title">
-                    {cvEngine() === 'neural' ? "CamScanner AI Active" : "OpenCV Vision Active"}
+                    {cvEngine() === 'neural' ? "Neural AI Active" : "OpenCV Vision Active"}
                   </strong>
                   <span class="engine-strip-hw">
-                    {cvEngine() === 'neural' ? "Arc A770 (XMX FP16)" : "CPU Math"}
+                    {cvEngine() === 'neural' ? `${detectedHardwareShort()} (FP16)` : "CPU Math"}
                   </span>
                 </div>
                 <span class={`engine-strip-badge ${cvEngine() === 'neural' ? 'ai' : 'cv'}`}>
@@ -1268,7 +1293,7 @@ export default function App() {
                 <div class="compact-group-label">
                   <span>Engine Architecture</span>
                   <Show when={neuralGpuInfo()?.available && cvEngine() === 'neural'}>
-                    <span class="gpu-active-badge">● Intel Arc A770</span>
+                    <span class="gpu-active-badge">● {detectedHardwareShort()}</span>
                   </Show>
                 </div>
                 <div class="compact-segment-row">
@@ -1276,10 +1301,10 @@ export default function App() {
                     class={`compact-segment-btn ${cvEngine() === 'neural' ? 'active-ai' : ''}`}
                     onClick={() => selectCvEngine('neural')}
                     type="button"
-                    title="DocRes Neural Transformer on Intel Arc A770 GPU. Eradicates bleed-through & creases."
+                    title={`DocRes Neural Transformer on ${detectedHardwareFull()}. Eradicates bleed-through & creases.`}
                   >
                     <span class="seg-icon">⚡</span>
-                    <span class="seg-label">CamScanner AI</span>
+                    <span class="seg-label">Neural AI</span>
                     <span class="seg-badge-ai">SOTA</span>
                   </button>
                   <button
@@ -1402,7 +1427,7 @@ export default function App() {
                     class={`tool-chip-btn ${cvShadows() ? 'active' : ''}`}
                     onClick={() => toggleCvSetting(setCvShadows, "SCANSMITH_CV_SHADOWS", !cvShadows())}
                     type="button"
-                    title={cvEngine() === 'neural' ? "DocRes Neural Transformer shadow & crease removal on Intel Arc A770" : "OpenCV morphological illumination equalization"}
+                    title={cvEngine() === 'neural' ? `DocRes Neural Transformer shadow & crease removal on ${detectedHardwareShort()}` : "OpenCV morphological illumination equalization"}
                   >
                     <span class="tool-chip-check">{cvShadows() ? "✔" : "•"}</span>
                     <span class="tool-chip-icon">💡</span>
@@ -1416,7 +1441,7 @@ export default function App() {
                     class={`tool-chip-btn ${cvDenoise() ? 'active' : ''}`}
                     onClick={() => toggleCvSetting(setCvDenoise, "SCANSMITH_CV_DENOISE", !cvDenoise())}
                     type="button"
-                    title={cvEngine() === 'neural' ? "DocRes AI bleed-through & toner speckle purge on Intel Arc A770" : "Connected-component speckle purge & background whitening"}
+                    title={cvEngine() === 'neural' ? `DocRes AI bleed-through & toner speckle purge on ${detectedHardwareShort()}` : "Connected-component speckle purge & background whitening"}
                   >
                     <span class="tool-chip-check">{cvDenoise() ? "✔" : "•"}</span>
                     <span class="tool-chip-icon">✨</span>
@@ -1440,8 +1465,8 @@ export default function App() {
                     <span>{cvEngine() === 'neural' ? '⚡' : '📐'}</span>
                     <span>
                       {isCvStale()
-                        ? (cvEngine() === 'neural' ? "Re-apply CamScanner AI" : "Apply Modified Settings")
-                        : (cvEngine() === 'neural' ? "Run CamScanner AI (Arc A770)" : "Run OpenCV Fast")}
+                        ? (cvEngine() === 'neural' ? "Re-apply Neural AI" : "Apply Modified Settings")
+                        : (cvEngine() === 'neural' ? `Run Neural AI (${detectedHardwareShort()})` : "Run OpenCV Fast")}
                     </span>
                   </button>
                   <Show when={isCvStale()}>

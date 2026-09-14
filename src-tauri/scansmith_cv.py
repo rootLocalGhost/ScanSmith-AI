@@ -480,7 +480,7 @@ def remove_shadows(image):
 
 def despeckle_image(image):
     """
-    CamScanner-grade edge-preserving denoise, bleed-through suppression,
+    ScanSmith high-grade edge-preserving denoise, bleed-through suppression,
     and connected-component speckle purge engine.
     - Suppresses reverse-side / back-page bleed-through text marks.
     - Purges scanner glass dust, sensor grain, and stray toner specks.
@@ -622,13 +622,13 @@ def enhance_output(image, mode="color"):
     except Exception:
         return image
 
-class IntelArcNeuralEngine:
+class ScanSmithNeuralEngine:
     """
     Hardware-accelerated Deep Learning Document Restoration Engine.
-    Executes DocRes / Restormer (CVPR 2024) via OpenVINO FP16 on Intel Arc A770 dGPU.
+    Executes DocRes / Restormer (CVPR 2024) via OpenVINO FP16 with dynamic hardware detection.
     - True semantic back-page bleed-through / show-through removal
     - Deep document appearance restoration & deshadowing
-    - Automatic fallback to high-precision OpenCV engine if model or GPU is unavailable
+    - Automatically discovers host GPU (discrete or integrated) or NPU, with clean CPU fallback
     """
     _instance = None
     _compiled_model = None
@@ -651,12 +651,27 @@ class IntelArcNeuralEngine:
             import openvino as ov
             self.core = ov.Core()
             devices = self.core.available_devices
-            self._target_device = "GPU" if "GPU" in devices else ("CPU" if "CPU" in devices else None)
+            # Prioritize GPU (discrete or integrated), then NPU, then CPU
+            self._target_device = None
+            for d in devices:
+                if d.startswith("GPU"):
+                    self._target_device = d
+                    break
+            if not self._target_device:
+                for d in devices:
+                    if d.startswith("NPU"):
+                        self._target_device = d
+                        break
+            if not self._target_device and "CPU" in devices:
+                self._target_device = "CPU"
+
             if self._target_device:
                 try:
                     self._device_name = self.core.get_property(self._target_device, "FULL_DEVICE_NAME")
                 except Exception:
                     self._device_name = self._target_device
+            else:
+                self._device_name = "None"
 
             # Look for OpenVINO IR model file
             possible_paths = [
@@ -689,7 +704,7 @@ class IntelArcNeuralEngine:
             return False
 
     def restore_appearance(self, image):
-        """Restores document appearance (bleed-through eradication & deshadowing) using DocRes on Intel Arc A770"""
+        """Restores document appearance (bleed-through eradication & deshadowing) using DocRes on detected system accelerator"""
         if not self.load_model():
             return None
         try:
@@ -725,6 +740,9 @@ class IntelArcNeuralEngine:
             print(f"[Warning] Neural restoration failed: {e}", file=sys.stderr)
             return None
 
+# Backward compatibility alias
+IntelArcNeuralEngine = ScanSmithNeuralEngine
+
 def process_image(input_path, output_dir, idx, do_split, do_orient, do_deskew, do_margins, do_shadows=True, do_denoise=True, filter_mode="color", engine="neural"):
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Input image not found: {input_path}")
@@ -746,7 +764,7 @@ def process_image(input_path, output_dir, idx, do_split, do_orient, do_deskew, d
     results = []
     os.makedirs(output_dir, exist_ok=True)
 
-    neural_engine = IntelArcNeuralEngine.get_instance() if engine == "neural" else None
+    neural_engine = ScanSmithNeuralEngine.get_instance() if engine == "neural" else None
 
     for sub_idx, page in enumerate(pages):
         current = page
@@ -812,7 +830,7 @@ def process_image(input_path, output_dir, idx, do_split, do_orient, do_deskew, d
 if __name__ == "__main__":
     if "--check-neural-gpu" in sys.argv:
         try:
-            engine = IntelArcNeuralEngine.get_instance()
+            engine = ScanSmithNeuralEngine.get_instance()
             info = {
                 "available": bool(engine.available),
                 "device": engine._target_device or "None",
